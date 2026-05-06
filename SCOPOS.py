@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 # Python version: 3.9
 # @TianZhen
-r"""
+"""
 Scopos
 Monitor GPU memory usage.
 NOTE: Display shell script details for a specified user.
@@ -12,13 +12,19 @@ import psutil
 import time
 import os
 import re
+import argparse
+from typing import (Dict, List)
 
+version = "v1.1.0"
+free_tag = "\033[2m\u2591\033[0m"
 
-USER_NAME = "tianzhen"
 REFRESH_INTERVAL = 5
 
-free_tag = "\033[2m\u2591\033[0m"
-version = "v1.1.0"
+parser = argparse.ArgumentParser()
+parser.add_argument("--user", "-u", type=str, default="")
+args = parser.parse_args()
+
+USER_NAME = args.user.strip()
 
 
 def limit_str(s: str, length: int):
@@ -39,13 +45,13 @@ while True:
     print()
 
     # init
-    user_codes: dict[str, int] = {}
+    user_codes: Dict[str, int] = {}
     next_code = 31
     if USER_NAME:
         user_codes[USER_NAME] = next_code
         next_code += 1
-    ppids_dict: dict[str, list[int]] = {}
-    pp_counts: dict[int, list[int]] = {}
+    ppids_dict: Dict[str, List[int]] = {}
+    pp_counts: Dict[int, List[int]] = {}
 
     for gpu_id in range(pn.nvmlDeviceGetCount()):
         # for each GPU
@@ -73,7 +79,7 @@ while True:
         # display header
         print(f"\033[4m{'PID'.ljust(8)}\u2502{'PROCESS'.ljust(8)}\u258F{'USER'.ljust(12)}\u258FNO.  \u2502{'MEMORY'.ljust(9)}\u2502{'CT'.ljust(17)} \u2502{'RT'.ljust(10)} \u2502{'DETAIL'.ljust(15)}\033[0m")
 
-        dev_user_mems: dict[str, float] = {}
+        dev_user_mems: Dict[str, float] = {}
         for process in processes:
             # for each process
 
@@ -119,7 +125,7 @@ while True:
                     cur_cmd = " ".join(cur_cmd_list)
                     total_task = 0
                     cur_task = -1
-                    bash_file_args_dict: dict[str, str] = {}
+                    bash_file_args_dict: Dict[str, str] = {}
 
                     def replace_bash_args(__cmd: str):
                         for arg, arg_val in bash_file_args_dict.items():
@@ -170,9 +176,9 @@ while True:
         try:
             code_rates = {(user, user_codes[user]): 100 * mem / total for user, mem in dev_user_mems.items()}
             sorted_code_rates = dict(sorted(code_rates.items(), key=lambda item: item[1], reverse=True))
-            first_line: list[str] = []
-            second_line: list[str] = []
-            next_line: list[str] = []
+            first_line: List[str] = []
+            second_line: List[str] = []
+            next_line: List[str] = []
             cur_first_line = True
             is_full = False
             for (_, code), rate in sorted_code_rates.items():
