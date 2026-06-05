@@ -12,10 +12,10 @@ from . import __version__
 from .monitor import (GPUInfo, Monitor, fmt_gb)
 
 
-LOGO = r"""  ___   ___  _____  ____  _____  ___
- / __) / __)(  _  )(  _ \(  _  )/ __)
- \__ \( (__  )(_)(  )___/ )(_)( \__ \
- (___/ \___)(_____)(__)  (_____)(___/"""
+LOGO = r"""  ___   ___  _____  ____  _____  ___  
+ / __) / __)(  _  )(  _ \(  _  )/ __) 
+ \__ \( (__  )(_)(  )___/ )(_)( \__ \ 
+ (___/ \___)(_____)(__)  (_____)(___/ """
 
 
 class Logo(Static):
@@ -153,8 +153,8 @@ class GpuCard(Vertical):
         ("MEM/GB", lambda p: p.mem),
         ("STARTED", lambda p: p.started_ts),
         ("RUNTIME", lambda p: p.runtime_sec),
-        ("COMMAND", lambda p: p.cmd.lower()),
         ("DETAIL", lambda p: (p.detail or "").lower()),
+        ("COMMAND", lambda p: p.cmd.lower()),
     ]
     # Columns that read most naturally largest-first on the initial click:
     # PID, MEM/GB, STARTED, RUNTIME.
@@ -163,7 +163,6 @@ class GpuCard(Vertical):
     def __init__(self, monitor: Monitor, show_detail: bool) -> None:
         super().__init__()
         self.monitor = monitor
-        self.show_detail = show_detail
         self.stats = Static(classes="stats")
         self.bar = MemoryBar()
         self.legend = Static(classes="legend")
@@ -172,6 +171,12 @@ class GpuCard(Vertical):
         self._gpu: Optional[GPUInfo] = None
         self._sort_index: Optional[int] = None
         self._sort_reverse: bool = False
+        # detail
+        self.show_detail = show_detail
+        if not show_detail:
+            self._header = self.COLUMNS[:-2] + self.COLUMNS[-1:]
+        else:
+            self._header = self.COLUMNS
 
     def compose(self):
         yield self.stats
@@ -183,17 +188,13 @@ class GpuCard(Vertical):
         if self._pending is not None:
             self._apply(self._pending)
 
-    @property
-    def _headers(self) -> List[Tuple[str, Optional[Callable]]]:
-        return self.COLUMNS if self.show_detail else self.COLUMNS[:-1]
-
     # -- sorting -----------------------------------------------------------
     def on_data_table_header_selected(
         self, event: DataTable.HeaderSelected
     ) -> None:
         event.stop()
         idx = event.column_index
-        if idx >= len(self._headers) or self._headers[idx][1] is None:
+        if idx >= len(self._header) or self._header[idx][1] is None:
             return
         if self._sort_index == idx:
             self._sort_reverse = not self._sort_reverse
@@ -223,12 +224,18 @@ class GpuCard(Vertical):
 
     def _update_stats(self, gpu: GPUInfo):
         rate = gpu.idle_rate
+        # if rate <= 0.15:
+        #     free_style = "bold white on red"
+        # elif rate <= 0.5:
+        #     free_style = "bold black on yellow"
+        # else:
+        #     free_style = "bold black on green"
         if rate <= 0.15:
-            free_style = "bold white on red"
+            free_style = "bold red"
         elif rate <= 0.5:
-            free_style = "bold black on yellow"
+            free_style = "bold yellow"
         else:
-            free_style = "bold black on green"
+            free_style = "bold green"
 
         line = Text(no_wrap=True, overflow="ellipsis")
         line.append("USED ", style="bold")
@@ -267,7 +274,7 @@ class GpuCard(Vertical):
     def _update_table(self, gpu: GPUInfo) -> None:
         # Rebuild columns each time so the sort arrow can move between headers.
         self.table.clear(columns=True)
-        headers = self._headers
+        headers = self._header
         labels = []
         for i, (name, _) in enumerate(headers):
             if i == self._sort_index:
@@ -293,7 +300,7 @@ class GpuCard(Vertical):
                 proc.cmd,
             ]
             if self.show_detail:
-                row.append(proc.detail)
+                row.insert(-1, proc.detail)
             self.table.add_row(*row)
         if not procs:
             empty = ["" for _ in headers]

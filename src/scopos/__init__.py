@@ -1,8 +1,10 @@
-# -*- coding: utf-8 -*-
-"""Scopos - a Textual TUI for monitoring GPU memory usage per user.
+# src/scopos/__init__.py
+"""
+SCOPOS
+======
 
-@TianZhen
+a Textual TUI for monitoring GPU memory usage per user.
 """
 
 __author__ = "Zhen Tian"
-__version__ = "2.0.0"
+__version__ = "2.0.1"

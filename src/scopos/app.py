@@ -33,6 +33,7 @@ class ScoposApp(App):
     """Monitor GPU memory usage, grouped by user."""
 
     TITLE = "SCOPOS"
+    THEME = "textual-dark"
 
     # Roughly the narrowest a card stays readable; used to pick column count.
     # The full COMMAND column needs room, so cards stay wide and only tile into
@@ -52,6 +53,7 @@ class ScoposApp(App):
         width: auto;
         height: 5;
         content-align: left top;
+        background: $panel;
     }
     #topbar Clock {
         width: auto;
