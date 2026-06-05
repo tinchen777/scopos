@@ -138,7 +138,7 @@ class GpuCard(Vertical):
     GpuCard .legend { height: auto; color: $text-muted; }
     GpuCard DataTable {
         height: auto;
-        max-height: 30;
+        max-height: 20;
         margin-top: 1;
     }
     """
@@ -216,7 +216,7 @@ class GpuCard(Vertical):
     def _apply(self, gpu: GPUInfo):
         self._pending = None
         self._gpu = gpu
-        self.border_title = f" #{gpu.index}  {gpu.name} "
+        self.border_title = f" # {gpu.index}  {gpu.name} "
         self._update_stats(gpu)
         self._update_bar(gpu)
         self._update_legend(gpu)
@@ -238,16 +238,26 @@ class GpuCard(Vertical):
             free_style = "bold green"
 
         line = Text(no_wrap=True, overflow="ellipsis")
-        line.append("USED ", style="bold")
+        # PROC
+        line.append("[PROC] ", style="bold")
+        line.append(f"{len(gpu.procs)}    ", style="bold")
+        # USED
+        line.append("[USED] ", style="bold")
         line.append(f"{fmt_gb(gpu.mem_used)}", style="bold")
         line.append(f" / {fmt_gb(gpu.mem_total)} GB", style="dim")
-        line.append(f"  ({gpu.used_rate * 100:.0f}%)   ")
-        line.append(f" FREE {fmt_gb(gpu.mem_free)} GB ", style=free_style)
+        line.append(f" ({gpu.used_rate * 100:.0f}%)    ")
+        # FREE
+        line.append("[FREE] ", style="bold")
+        line.append(f"{fmt_gb(gpu.mem_free)} GB ", style=free_style)
+        # ⚡
         if gpu.util >= 0:
-            line.append(f"   ⚡ {gpu.util}%", style="cyan")
+            line.append("   [⚡] ", style="bold")
+            line.append(f"{gpu.util}%", style="cyan")
+        # 🌡
         if gpu.temperature >= 0:
+            line.append("   [🌡] ", style="bold")
             temp_style = "red" if gpu.temperature >= 80 else "cyan"
-            line.append(f"   🌡 {gpu.temperature}°C", style=temp_style)
+            line.append(f"{gpu.temperature}°C", style=temp_style)
         self.stats.update(line)
 
     def _update_bar(self, gpu: GPUInfo):
@@ -266,9 +276,10 @@ class GpuCard(Vertical):
         for user, mem in ordered:
             color = self.monitor.color_for(user)
             pct = mem / gpu.mem_total * 100 if gpu.mem_total else 0
+            legend.append("🏆 " if user == mvp else "")
             legend.append("● ", style=color)
-            crown = "🏆 " if user == mvp else ""
-            legend.append(f"{crown}{user} {fmt_gb(mem)}G {pct:.0f}%   ")
+            legend.append(user, style=color)
+            legend.append(f" {fmt_gb(mem)} GB ({pct:.0f}%)   ")
         self.legend.update(legend)
 
     def _update_table(self, gpu: GPUInfo) -> None:

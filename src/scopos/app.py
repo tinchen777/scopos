@@ -10,16 +10,20 @@ from textual.widgets import (Footer, Static)
 from typing import (Dict, List)
 
 from . import __version__
-from .monitor import GPUInfo, Monitor
-from .widgets import GpuCard, Logo, SysMeter
+from .monitor import (GPUInfo, Monitor)
+from .widgets import (GpuCard, Logo, SysMeter)
 
 
 class Clock(Static):
     """Date / time / version, pinned top-right."""
 
+    def __init__(self, interval: int):
+        super().__init__()
+        self.interval = interval
+
     def on_mount(self):
         self.update_clock()
-        self.set_interval(1.0, self.update_clock)
+        self.set_interval(self.interval, self.update_clock)
 
     def update_clock(self):
         now = time.localtime()
@@ -33,7 +37,7 @@ class ScoposApp(App):
     """Monitor GPU memory usage, grouped by user."""
 
     TITLE = "SCOPOS"
-    THEME = "textual-dark"
+    THEME = "ansi-dark"
 
     # Roughly the narrowest a card stays readable; used to pick column count.
     # The full COMMAND column needs room, so cards stay wide and only tile into
@@ -109,7 +113,7 @@ class ScoposApp(App):
         with Horizontal(id="topbar"):
             yield Logo()
             yield Static(id="spacer1")
-            yield Clock()
+            yield Clock(self.interval)
             yield Static(id="spacer2")
             yield SysMeter(self.monitor)
         with VerticalScroll(id="body"):
@@ -175,7 +179,7 @@ class ScoposApp(App):
             else ""
         )
         text = Text()
-        text.append(f"{len(gpus)} GPU · {n_proc} proc · {len(users)} users")
+        text.append(f"{len(gpus)} GPU(s) · {n_proc} proc(s) · {len(users)} user(s)")
         text.append(
             f"  ·  refresh {self.interval}s  ·  {mode}{watch}"
             "  ·  click a column header to sort",
