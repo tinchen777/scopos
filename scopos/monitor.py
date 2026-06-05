@@ -58,8 +58,11 @@ class ProcInfo:
     mem: int  # bytes of GPU memory used
     started: str  # parent-process creation time, formatted
     runtime: str  # how long this process has been running, formatted
-    number: str  # per-user "parentNo-childNo" label
+    number: str  # per-user "parentNo-childNo" label, filled by Monitor
     detail: str  # script/task detail (only filled for the watched user)
+    ppid: int = 0  # parent pid, used for per-user numbering
+    started_ts: float = 0.0  # raw parent start time, for sorting
+    runtime_sec: int = 0  # raw runtime in seconds, for sorting
 
 
 @dataclass
@@ -138,6 +141,25 @@ class Monitor:
                 pass
             self._initialised = False
 
+    # -- system memory -----------------------------------------------------
+    def system_stats(self) -> Dict[str, tuple]:
+        """Return host RAM/swap usage as {"mem": (used, total), "swap": (...)}.
+
+        Falls back to plausible synthetic values when psutil is unavailable
+        (e.g. demo mode on a machine without it installed).
+        """
+        if psutil is not None:
+            vm = psutil.virtual_memory()
+            sm = psutil.swap_memory()
+            return {"mem": (vm.used, vm.total), "swap": (sm.used, sm.total)}
+        rng = random.Random()
+        mem_total = 32 * 1024 ** 3
+        swap_total = 8 * 1024 ** 3
+        return {
+            "mem": (int(mem_total * rng.uniform(0.2, 0.8)), mem_total),
+            "swap": (int(swap_total * rng.uniform(0.0, 0.4)), swap_total),
+        }
+
     # -- collection --------------------------------------------------------
     def collect(self) -> List[GPUInfo]:
         if self.demo:
@@ -148,9 +170,6 @@ class Monitor:
     def _collect_real(self) -> List[GPUInfo]:
         self.start()
         gpus: List[GPUInfo] = []
-        # Per-refresh process numbering state (matches the original tool).
-        ppids_by_user: Dict[str, List[int]] = {}
-        children_by_ppid: Dict[int, int] = {}
 
         for gpu_id in range(pn.nvmlDeviceGetCount()):
             handle = pn.nvmlDeviceGetHandleByIndex(gpu_id)
@@ -176,9 +195,7 @@ class Monitor:
                 processes = []
 
             for process in processes:
-                info = self._build_proc(
-                    process, ppids_by_user, children_by_ppid
-                )
+                info = self._build_proc(process)
                 if info is None:
                     continue
                 gpu.procs.append(info)
@@ -186,44 +203,52 @@ class Monitor:
                     gpu.user_mems.get(info.user, 0) + info.mem
                 )
             gpus.append(gpu)
+        self._assign_numbers(gpus)
         return gpus
 
-    def _build_proc(
-        self,
-        process,
-        ppids_by_user: Dict[str, List[int]],
-        children_by_ppid: Dict[int, int],
-    ) -> Optional[ProcInfo]:
+    def _assign_numbers(self, gpus: List[GPUInfo]) -> None:
+        """Fill in each process's "parentNo-childNo" label.
+
+        Numbering is per user and spans every GPU: a user's parent processes
+        are numbered in the order they are first seen across all GPUs, and the
+        child counter increments for every process sharing that parent.
+        """
+        user_ppids: Dict[str, List[int]] = {}
+        child_count: Dict[tuple, int] = {}
+        for gpu in gpus:
+            for proc in gpu.procs:
+                ppids = user_ppids.setdefault(proc.user, [])
+                if proc.ppid not in ppids:
+                    ppids.append(proc.ppid)
+                pp_no = ppids.index(proc.ppid) + 1
+                key = (proc.user, proc.ppid)
+                child_count[key] = child_count.get(key, 0) + 1
+                proc.number = f"{pp_no:02d}-{child_count[key]:02d}"
+
+    def _build_proc(self, process) -> Optional[ProcInfo]:
         try:
             pid = int(process.pid)
             p = psutil.Process(pid)
         except Exception:
             return None
+        started_ts = 0.0
         try:
             ppid = p.ppid()
             pp = psutil.Process(ppid)
-            started = time.strftime(
-                "%y-%m-%d %H:%M:%S", time.localtime(pp.create_time())
-            )
+            started_ts = pp.create_time()
+            started = time.strftime("%y-%m-%d %H:%M:%S", time.localtime(started_ts))
         except Exception:
             ppid = 0
             pp = None
             started = "?"
 
-        runtime = fmt_runtime(int(time.time() - p.create_time()))
+        runtime_sec = int(time.time() - p.create_time())
+        runtime = fmt_runtime(runtime_sec)
         try:
             user = p.username()
         except Exception:
             user = "?"
         self.color_for(user)
-
-        # Per-user parent/child numbering, e.g. "02-03".
-        user_ppids = ppids_by_user.setdefault(user, [])
-        if ppid not in user_ppids:
-            user_ppids.append(ppid)
-        pp_no = user_ppids.index(ppid) + 1
-        children_by_ppid[ppid] = children_by_ppid.get(ppid, 0) + 1
-        number = f"{pp_no:02d}-{children_by_ppid[ppid]:02d}"
 
         mem = int(process.usedGpuMemory or 0)
 
@@ -231,7 +256,11 @@ class Monitor:
         if user == self.watch_user and pp is not None:
             detail = self._script_detail(p, pp)
 
-        return ProcInfo(pid, p.name(), user, mem, started, runtime, number, detail)
+        # number is assigned later, once every GPU has been collected.
+        return ProcInfo(
+            pid, p.name(), user, mem, started, runtime, "", detail,
+            ppid=ppid, started_ts=started_ts, runtime_sec=runtime_sec,
+        )
 
     def _script_detail(self, p, pp) -> str:
         """Best-effort reconstruction of which task in a shell script is running.
@@ -283,6 +312,10 @@ class Monitor:
             "NVIDIA H100 80GB HBM3",
         ]
         users_pool = ["alice", "bob", "carol", "dave", "erin", self.watch_user or "frank"]
+        # Give each user a small pool of "parent" pids so the same parent can
+        # show up on several GPUs - that is what makes the per-user numbering
+        # (parentNo-childNo) interesting to look at.
+        parent_pids = {u: [rng.randint(1000, 9999) for _ in range(2)] for u in users_pool}
         gpus: List[GPUInfo] = []
         n_gpu = 4
         for gpu_id in range(n_gpu):
@@ -298,7 +331,7 @@ class Monitor:
             )
             used = 0
             n_proc = rng.randint(0, 5)
-            for i in range(n_proc):
+            for _ in range(n_proc):
                 user = rng.choice(users_pool)
                 self.color_for(user)
                 mem = rng.randint(1, 12) * 1024 ** 3
@@ -308,22 +341,28 @@ class Monitor:
                 detail = "-"
                 if user == self.watch_user:
                     detail = f"train_{rng.randint(1,9)}.sh [{rng.randint(1,4)}/4]"
+                runtime_sec = rng.randint(0, 200000)
+                started_ts = time.time() - runtime_sec
                 gpu.procs.append(
                     ProcInfo(
-                        pid=rng.randint(1000, 99999),
+                        pid=rng.randint(10000, 99999),
                         name=rng.choice(["python", "python3", "train", "pt_main"]),
                         user=user,
                         mem=mem,
-                        started=time.strftime("%y-%m-%d %H:%M:%S"),
-                        runtime=fmt_runtime(rng.randint(0, 200000)),
-                        number=f"{i+1:02d}-01",
+                        started=time.strftime("%y-%m-%d %H:%M:%S", time.localtime(started_ts)),
+                        runtime=fmt_runtime(runtime_sec),
+                        number="",
                         detail=detail,
+                        ppid=rng.choice(parent_pids[user]),
+                        started_ts=started_ts,
+                        runtime_sec=runtime_sec,
                     )
                 )
                 gpu.user_mems[user] = gpu.user_mems.get(user, 0) + mem
             gpu.mem_used = used
             gpu.mem_free = total - used
             gpus.append(gpu)
+        self._assign_numbers(gpus)
         return gpus
 
 

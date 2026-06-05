@@ -13,7 +13,7 @@ from textual.widgets import Footer, Static
 
 from . import __version__
 from .monitor import GPUInfo, Monitor
-from .widgets import GpuCard, Logo
+from .widgets import GpuCard, Logo, SysMeter
 
 
 class Clock(Static):
@@ -94,6 +94,7 @@ class ScoposApp(App):
     def compose(self) -> ComposeResult:
         with Horizontal(id="topbar"):
             yield Logo()
+            yield SysMeter(self.monitor)
             yield Static(id="spacer")
             yield Clock()
         with VerticalScroll(id="body"):
@@ -160,7 +161,11 @@ class ScoposApp(App):
         )
         text = Text()
         text.append(f"{len(gpus)} GPU · {n_proc} proc · {len(users)} users")
-        text.append(f"  ·  refresh {self.interval}s  ·  {mode}{watch}", style="dim")
+        text.append(
+            f"  ·  refresh {self.interval}s  ·  {mode}{watch}"
+            "  ·  click a column header to sort",
+            style="dim",
+        )
         self.query_one("#status", Static).update(text)
 
     def on_unmount(self) -> None:
