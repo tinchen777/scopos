@@ -17,7 +17,7 @@ dependencies = [
 ]
 
 [project.scripts]
-scopos = "scopos.__main__:main"
+scopos = "scopos.cli:main"
 
 [tool.setuptools]
 packages = ["scopos"]
