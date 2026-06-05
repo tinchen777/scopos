@@ -14,6 +14,12 @@ def parse_args(argv=None) -> argparse.Namespace:
         description="Monitor GPU memory usage, grouped by user (Textual TUI).",
     )
     parser.add_argument(
+        "-t",
+        "--theme",
+        default="ansi-dark",
+        help="Textual theme to use (default: ansi-dark). See https://textual.textualize.io/themes/ for options.",
+    )
+    parser.add_argument(
         "-u",
         "--user",
         default="",
@@ -46,5 +52,6 @@ def main(argv=None):
         watch_user=args.user,
         interval=args.interval,
         demo=args.demo,
+        theme=args.theme,
     )
     app.run()

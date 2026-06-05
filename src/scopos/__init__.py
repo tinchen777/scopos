@@ -7,4 +7,4 @@ a Textual TUI for monitoring GPU memory usage per user.
 """
 
 __author__ = "Zhen Tian"
-__version__ = "2.0.2"
+__version__ = "2.0.3"

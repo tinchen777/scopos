@@ -37,7 +37,6 @@ class ScoposApp(App):
     """Monitor GPU memory usage, grouped by user."""
 
     TITLE = "SCOPOS"
-    THEME = "ansi-dark"
 
     # Roughly the narrowest a card stays readable; used to pick column count.
     # The full COMMAND column needs room, so cards stay wide and only tile into
@@ -102,12 +101,13 @@ class ScoposApp(App):
         ("d", "toggle_dark", "Light/Dark"),
     ]
 
-    def __init__(self, watch_user: str = "", interval: int = 5, demo: bool = False):
+    def __init__(self, watch_user: str = "", interval: int = 5, demo: bool = False, theme: str = "ansi-dark"):
         super().__init__()
         self.interval = max(1, interval)
         self.monitor = Monitor(watch_user=watch_user, demo=demo)
         self.show_detail = bool(self.monitor.watch_user)
         self._cards: Dict[int, GpuCard] = {}
+        self.theme = theme
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="topbar"):
