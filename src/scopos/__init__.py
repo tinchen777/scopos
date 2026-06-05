@@ -4,6 +4,5 @@
 @TianZhen
 """
 
-__version__ = "v2.0.0"
-
-__all__ = ["__version__"]
+__author__ = "Zhen Tian"
+__version__ = "2.0.0"

@@ -2,7 +2,6 @@
 """Command line entry point: ``python -m scopos``."""
 
 from __future__ import annotations
-
 import argparse
 
 from . import __version__
@@ -41,7 +40,7 @@ def parse_args(argv=None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def main(argv=None) -> None:
+def main(argv=None):
     args = parse_args(argv)
     app = ScoposApp(
         watch_user=args.user,
@@ -49,7 +48,3 @@ def main(argv=None) -> None:
         demo=args.demo,
     )
     app.run()
-
-
-if __name__ == "__main__":
-    main()

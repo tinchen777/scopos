@@ -2,14 +2,12 @@
 """The Scopos Textual application."""
 
 from __future__ import annotations
-
 import time
-from typing import Dict, List
-
 from rich.text import Text
-from textual.app import App, ComposeResult
-from textual.containers import Container, Horizontal, VerticalScroll
-from textual.widgets import Footer, Static
+from textual.app import (App, ComposeResult)
+from textual.containers import (Container, Horizontal, VerticalScroll)
+from textual.widgets import (Footer, Static)
+from typing import (Dict, List)
 
 from . import __version__
 from .monitor import GPUInfo, Monitor
@@ -19,11 +17,11 @@ from .widgets import GpuCard, Logo, SysMeter
 class Clock(Static):
     """Date / time / version, pinned top-right."""
 
-    def on_mount(self) -> None:
+    def on_mount(self):
         self.update_clock()
         self.set_interval(1.0, self.update_clock)
 
-    def update_clock(self) -> None:
+    def update_clock(self):
         now = time.localtime()
         text = Text(justify="right")
         text.append(time.strftime("%Y-%m-%d\n", now), style="bold")
@@ -102,15 +100,15 @@ class ScoposApp(App):
         yield Static(id="status")
         yield Footer()
 
-    def on_mount(self) -> None:
+    def on_mount(self):
         self.refresh_data()
         self.set_interval(self.interval, self.refresh_data)
 
-    def on_resize(self) -> None:
+    def on_resize(self):
         self._relayout_columns()
 
     # -- layout ------------------------------------------------------------
-    def _relayout_columns(self) -> None:
+    def _relayout_columns(self):
         if not self._cards:
             return
         width = self.size.width
@@ -120,10 +118,10 @@ class ScoposApp(App):
         grid.styles.grid_size_columns = cols
 
     # -- data --------------------------------------------------------------
-    def action_refresh(self) -> None:
+    def action_refresh(self):
         self.refresh_data()
 
-    def refresh_data(self) -> None:
+    def refresh_data(self):
         try:
             gpus = self.monitor.collect()
         except Exception as exc:  # keep the UI alive on transient NVML errors
@@ -136,7 +134,7 @@ class ScoposApp(App):
             self._cards[gpu.index].update(gpu)
         self._update_status(gpus)
 
-    def _sync_cards(self, gpus: List[GPUInfo]) -> None:
+    def _sync_cards(self, gpus: List[GPUInfo]):
         wanted = {g.index for g in gpus}
         if wanted == set(self._cards):
             return
@@ -150,7 +148,7 @@ class ScoposApp(App):
             grid.mount(card)
         self.call_after_refresh(self._relayout_columns)
 
-    def _update_status(self, gpus: List[GPUInfo]) -> None:
+    def _update_status(self, gpus: List[GPUInfo]):
         n_proc = sum(len(g.procs) for g in gpus)
         users = {p.user for g in gpus for p in g.procs}
         mode = "demo" if self.monitor.demo else "live"
@@ -168,5 +166,5 @@ class ScoposApp(App):
         )
         self.query_one("#status", Static).update(text)
 
-    def on_unmount(self) -> None:
+    def on_unmount(self):
         self.monitor.stop()

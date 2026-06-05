@@ -8,13 +8,11 @@ process numbering, exactly like the original CLI did.
 """
 
 from __future__ import annotations
-
-import os
 import re
 import time
 import random
-from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from dataclasses import (dataclass, field)
+from typing import (Dict, List, Optional)
 
 try:  # pynvml is only available on machines with an NVIDIA driver.
     import pynvml as pn
@@ -31,7 +29,7 @@ except Exception:  # pragma: no cover
 # first appearance. Names are Rich/Textual colour names so they render the
 # same in tables, bars and legends.
 USER_PALETTE: List[str] = [
-    "bright_red",
+    # "bright_red",
     "bright_green",
     "bright_yellow",
     "bright_blue",
@@ -108,16 +106,16 @@ def fmt_runtime(seconds: int) -> str:
 class Monitor:
     """Collects GPU snapshots, keeping per-user state stable across refreshes."""
 
-    def __init__(self, watch_user: str = "", demo: bool = False) -> None:
+    def __init__(self, watch_user: str = "", demo: bool = False):
         self.watch_user = watch_user.strip()
-        self.demo = demo or pn is None or psutil is None
+        self.demo = demo
         # username -> colour, assigned on first sight and kept forever.
         self._user_colors: Dict[str, str] = {}
         self._next_color = 0
         self._initialised = False
         if self.watch_user:
-            # Make sure the watched user always grabs the first colour.
-            self.color_for(self.watch_user)
+            # Make sure the watched user always gets `bright_red`.
+            self._user_colors.setdefault(self.watch_user, "bright_red")
 
     # -- colours -----------------------------------------------------------
     def color_for(self, user: str) -> str:
@@ -128,13 +126,13 @@ class Monitor:
         return self._user_colors[user]
 
     # -- lifecycle ---------------------------------------------------------
-    def start(self) -> None:
-        if not self.demo and not self._initialised:
+    def start(self):
+        if not self.demo and not self._initialised and pn is not None:
             pn.nvmlInit()
             self._initialised = True
 
-    def stop(self) -> None:
-        if not self.demo and self._initialised:
+    def stop(self):
+        if not self.demo and self._initialised and pn is not None:
             try:
                 pn.nvmlShutdown()
             except Exception:

@@ -8,9 +8,9 @@ from typing import Callable, List, Optional, Tuple
 from rich.text import Text
 from textual.containers import Vertical
 from textual.widget import Widget
-from textual.widgets import DataTable, Static
+from textual.widgets import (DataTable, Static)
 
-from .monitor import GPUInfo, Monitor, fmt_gb
+from .monitor import (GPUInfo, Monitor, fmt_gb)
 
 
 LOGO = r"""  ___   ___  _____  ____  _____  ___
@@ -22,7 +22,7 @@ LOGO = r"""  ___   ___  _____  ____  _____  ___
 class Logo(Static):
     """The SCOPOS ASCII logo, pinned top-left."""
 
-    def __init__(self) -> None:
+    def __init__(self):
         text = Text(LOGO, style="bold cyan")
         super().__init__(text)
 
@@ -91,12 +91,12 @@ class MemoryBar(Widget):
     }
     """
 
-    def __init__(self) -> None:
+    def __init__(self):
         super().__init__()
         self._segments: List[Tuple[str, float]] = []
         self._total: float = 1.0
 
-    def set_data(self, segments: List[Tuple[str, float]], total: float) -> None:
+    def set_data(self, segments: List[Tuple[str, float]], total: float):
         """segments: list of (colour, weight); total: the bar's full weight."""
         self._segments = segments
         self._total = total or 1.0
@@ -138,7 +138,7 @@ class GpuCard(Vertical):
     GpuCard .legend { height: auto; color: $text-muted; }
     GpuCard DataTable {
         height: auto;
-        max-height: 10;
+        max-height: 20;
         margin-top: 1;
     }
     """
@@ -203,7 +203,7 @@ class GpuCard(Vertical):
             self._update_table(self._gpu)
 
     # -- updating ----------------------------------------------------------
-    def update(self, gpu: GPUInfo) -> None:
+    def update(self, gpu: GPUInfo):
         # A card may be updated in the same frame it is mounted, before its
         # columns exist; defer until on_mount in that case.
         if not self.is_mounted:
@@ -211,7 +211,7 @@ class GpuCard(Vertical):
             return
         self._apply(gpu)
 
-    def _apply(self, gpu: GPUInfo) -> None:
+    def _apply(self, gpu: GPUInfo):
         self._pending = None
         self._gpu = gpu
         self.border_title = f" #{gpu.index}  {gpu.name} "
@@ -220,7 +220,7 @@ class GpuCard(Vertical):
         self._update_legend(gpu)
         self._update_table(gpu)
 
-    def _update_stats(self, gpu: GPUInfo) -> None:
+    def _update_stats(self, gpu: GPUInfo):
         rate = gpu.idle_rate
         if rate <= 0.15:
             remain_style = "bold red"
@@ -243,12 +243,12 @@ class GpuCard(Vertical):
             line.append(f"   🌡{gpu.temperature}°C", style=temp_style)
         self.stats.update(line)
 
-    def _update_bar(self, gpu: GPUInfo) -> None:
+    def _update_bar(self, gpu: GPUInfo):
         ordered = sorted(gpu.user_mems.items(), key=lambda kv: kv[1], reverse=True)
         segments = [(self.monitor.color_for(u), float(m)) for u, m in ordered]
         self.bar.set_data(segments, float(gpu.mem_total))
 
-    def _update_legend(self, gpu: GPUInfo) -> None:
+    def _update_legend(self, gpu: GPUInfo):
         ordered = sorted(gpu.user_mems.items(), key=lambda kv: kv[1], reverse=True)
         legend = Text(no_wrap=True, overflow="ellipsis")
         if not ordered:
