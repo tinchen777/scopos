@@ -34,11 +34,10 @@ class SysMeter(Static):
     SysMeter {
         width: auto;
         height: auto;
-        padding: 1 2 0 2;
     }
     """
 
-    BAR_WIDTH = 10
+    BAR_WIDTH = 26
 
     def __init__(self, monitor: Monitor) -> None:
         super().__init__()
@@ -50,7 +49,7 @@ class SysMeter(Static):
 
     def refresh_stats(self) -> None:
         stats = self.monitor.system_stats()
-        text = Text()
+        text = Text(justify="right")
         text.append(self._line("Mem", *stats["mem"]))
         text.append("\n")
         text.append(self._line("Swp", *stats["swap"]))
@@ -66,14 +65,15 @@ class SysMeter(Static):
         else:
             color = "green"
         filled = round(frac * self.BAR_WIDTH)
+        gb = 1024 ** 3
         line = Text()
         line.append(f"{label} ", style="bold")
         line.append("▕", style="grey50")
         line.append("█" * filled, style=color)
         line.append("░" * (self.BAR_WIDTH - filled), style="grey35")
         line.append("▏", style="grey50")
-        gb = 1024 ** 3
-        line.append(f" {used / gb:.1f}/{total / gb:.0f}G", style="dim")
+        line.append(f" {used / gb:5.1f} / {total / gb:5.1f} GB", style="dim")
+        line.append(f" {frac * 100:3.0f}%", style=color)
         return line
 
 
@@ -144,20 +144,21 @@ class GpuCard(Vertical):
     """
 
     # Header labels and, for each, how to sort the rows by that column.
-    # ``None`` means the column is not sortable.
+    # ``None`` means the column is not sortable. The trailing DETAIL column is
+    # only shown when a user is being watched (see ``_headers``).
     COLUMNS: List[Tuple[str, Optional[Callable]]] = [
-        ("", lambda p: p.user.lower()),
         ("PID", lambda p: p.pid),
-        ("PROC", lambda p: p.name.lower()),
         ("USER", lambda p: p.user.lower()),
         ("NO.", lambda p: (p.user.lower(), p.number)),
         ("MEM/GB", lambda p: p.mem),
         ("STARTED", lambda p: p.started_ts),
         ("RUNTIME", lambda p: p.runtime_sec),
+        ("COMMAND", lambda p: p.cmd.lower()),
         ("DETAIL", lambda p: (p.detail or "").lower()),
     ]
-    # Columns that read most naturally largest-first on the initial click.
-    DESC_FIRST = {1, 5, 6, 7}
+    # Columns that read most naturally largest-first on the initial click:
+    # PID, MEM/GB, STARTED, RUNTIME.
+    DESC_FIRST = {0, 3, 4, 5}
 
     def __init__(self, monitor: Monitor, show_detail: bool) -> None:
         super().__init__()
@@ -223,19 +224,18 @@ class GpuCard(Vertical):
     def _update_stats(self, gpu: GPUInfo):
         rate = gpu.idle_rate
         if rate <= 0.15:
-            remain_style = "bold red"
+            free_style = "bold white on red"
         elif rate <= 0.5:
-            remain_style = "bold yellow"
+            free_style = "bold black on yellow"
         else:
-            remain_style = "bold green"
+            free_style = "bold black on green"
 
         line = Text(no_wrap=True, overflow="ellipsis")
         line.append("USED ", style="bold")
         line.append(f"{fmt_gb(gpu.mem_used)}", style="bold")
         line.append(f" / {fmt_gb(gpu.mem_total)} GB", style="dim")
         line.append(f"  ({gpu.used_rate * 100:.0f}%)   ")
-        line.append("FREE ", style=remain_style)
-        line.append(f"{fmt_gb(gpu.mem_free)} GB", style=remain_style)
+        line.append(f" FREE {fmt_gb(gpu.mem_free)} GB ", style=free_style)
         if gpu.util >= 0:
             line.append(f"   ⚡{gpu.util}%", style="cyan")
         if gpu.temperature >= 0:
@@ -284,19 +284,18 @@ class GpuCard(Vertical):
         for proc in procs:
             color = self.monitor.color_for(proc.user)
             row = [
-                Text("●", style=color),
                 str(proc.pid),
-                proc.name,
-                Text(proc.user, style=color),
+                Text(f"● {proc.user}", style=color),
                 proc.number,
                 fmt_gb(proc.mem),
                 proc.started,
                 proc.runtime,
+                proc.cmd,
             ]
             if self.show_detail:
                 row.append(proc.detail)
             self.table.add_row(*row)
         if not procs:
             empty = ["" for _ in headers]
-            empty[2] = "— no compute processes —"
+            empty[1] = "— no compute processes —"
             self.table.add_row(*[Text(c, style="dim") for c in empty])

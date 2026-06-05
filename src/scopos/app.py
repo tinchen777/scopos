@@ -23,8 +23,8 @@ class Clock(Static):
 
     def update_clock(self):
         now = time.localtime()
-        text = Text(justify="right")
-        text.append(time.strftime("%Y-%m-%d\n", now), style="bold")
+        text = Text(justify="left")
+        text.append(time.strftime("%Y-%m-%d  ", now), style="bold")
         text.append(time.strftime("%H:%M:%S\n", now), style="bold cyan")
         text.append(f"scopos {__version__}", style="dim")
         self.update(text)
@@ -36,27 +36,37 @@ class ScoposApp(App):
     TITLE = "SCOPOS"
 
     # Roughly the narrowest a card stays readable; used to pick column count.
-    CARD_MIN_WIDTH = 60
+    # The full COMMAND column needs room, so cards stay wide and only tile into
+    # multiple columns on genuinely wide terminals.
+    CARD_MIN_WIDTH = 100
 
     CSS = """
     Screen {
         layout: vertical;
     }
     #topbar {
-        height: 5;
+        height: 4;
         padding: 0 1;
         background: $panel;
     }
     #topbar Logo {
         width: auto;
+        height: 4;
         content-align: left top;
+    }
+    #topbar Clock {
+        width: auto;
+        height: 4;
+        padding-left: 3;
+        content-align: left bottom;
     }
     #topbar #spacer {
         width: 1fr;
     }
-    #topbar Clock {
+    #topbar SysMeter {
         width: auto;
-        content-align: right top;
+        height: 4;
+        content-align: right bottom;
     }
     #grid {
         layout: grid;
@@ -92,9 +102,9 @@ class ScoposApp(App):
     def compose(self) -> ComposeResult:
         with Horizontal(id="topbar"):
             yield Logo()
-            yield SysMeter(self.monitor)
-            yield Static(id="spacer")
             yield Clock()
+            yield Static(id="spacer")
+            yield SysMeter(self.monitor)
         with VerticalScroll(id="body"):
             yield Container(id="grid")
         yield Static(id="status")

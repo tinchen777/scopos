@@ -58,6 +58,7 @@ class ProcInfo:
     runtime: str  # how long this process has been running, formatted
     number: str  # per-user "parentNo-childNo" label, filled by Monitor
     detail: str  # script/task detail (only filled for the watched user)
+    cmd: str = ""  # full command line, including arguments
     ppid: int = 0  # parent pid, used for per-user numbering
     started_ts: float = 0.0  # raw parent start time, for sorting
     runtime_sec: int = 0  # raw runtime in seconds, for sorting
@@ -96,11 +97,19 @@ def fmt_gb(num_bytes: float) -> str:
     return "%.2f" % (num_bytes / (1024 ** 3))
 
 
-def fmt_runtime(seconds: int) -> str:
-    h = seconds // 3600
-    m = (seconds % 3600) // 60
-    s = seconds % 60
-    return f"{h:>3}:{m:02d}:{s:02d}"
+def fmt_duration(seconds: int) -> str:
+    """Format a time span with unit symbols, e.g. "2d 03h", "3h 20m", "45s"."""
+    seconds = max(0, int(seconds))
+    d, rem = divmod(seconds, 86400)
+    h, rem = divmod(rem, 3600)
+    m, s = divmod(rem, 60)
+    if d:
+        return f"{d}d {h:02d}h"
+    if h:
+        return f"{h}h {m:02d}m"
+    if m:
+        return f"{m}m {s:02d}s"
+    return f"{s}s"
 
 
 class Monitor:
@@ -241,12 +250,19 @@ class Monitor:
             started = "?"
 
         runtime_sec = int(time.time() - p.create_time())
-        runtime = fmt_runtime(runtime_sec)
+        runtime = fmt_duration(runtime_sec)
         try:
             user = p.username()
         except Exception:
             user = "?"
         self.color_for(user)
+
+        try:
+            cmd = " ".join(p.cmdline()).strip()
+        except Exception:
+            cmd = ""
+        if not cmd:
+            cmd = p.name()
 
         mem = int(process.usedGpuMemory or 0)
 
@@ -257,7 +273,7 @@ class Monitor:
         # number is assigned later, once every GPU has been collected.
         return ProcInfo(
             pid, p.name(), user, mem, started, runtime, "", detail,
-            ppid=ppid, started_ts=started_ts, runtime_sec=runtime_sec,
+            cmd=cmd, ppid=ppid, started_ts=started_ts, runtime_sec=runtime_sec,
         )
 
     def _script_detail(self, p, pp) -> str:
@@ -339,8 +355,14 @@ class Monitor:
                 detail = "-"
                 if user == self.watch_user:
                     detail = f"train_{rng.randint(1,9)}.sh [{rng.randint(1,4)}/4]"
-                runtime_sec = rng.randint(0, 200000)
+                runtime_sec = rng.randint(0, 400000)
                 started_ts = time.time() - runtime_sec
+                script = rng.choice(["train.py", "finetune.py", "eval.py", "main.py"])
+                cmd = (
+                    f"python {script} --lr {rng.choice(['1e-3', '5e-4', '3e-5'])}"
+                    f" --batch-size {rng.choice([16, 32, 64])}"
+                    f" --epochs {rng.randint(10, 200)} --fp16"
+                )
                 gpu.procs.append(
                     ProcInfo(
                         pid=rng.randint(10000, 99999),
@@ -348,9 +370,10 @@ class Monitor:
                         user=user,
                         mem=mem,
                         started=time.strftime("%y-%m-%d %H:%M:%S", time.localtime(started_ts)),
-                        runtime=fmt_runtime(runtime_sec),
+                        runtime=fmt_duration(runtime_sec),
                         number="",
                         detail=detail,
+                        cmd=cmd,
                         ppid=rng.choice(parent_pids[user]),
                         started_ts=started_ts,
                         runtime_sec=runtime_sec,
