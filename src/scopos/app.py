@@ -25,8 +25,7 @@ class Clock(Static):
         now = time.localtime()
         text = Text(justify="left")
         text.append(time.strftime("%Y-%m-%d  ", now), style="bold")
-        text.append(time.strftime("%H:%M:%S\n", now), style="bold cyan")
-        text.append(f"scopos {__version__}", style="dim")
+        text.append(time.strftime("%H:%M:%S", now), style="bold cyan")
         self.update(text)
 
 
@@ -45,27 +44,32 @@ class ScoposApp(App):
         layout: vertical;
     }
     #topbar {
-        height: 4;
+        height: 5;
         padding: 0 1;
         background: $panel;
     }
     #topbar Logo {
         width: auto;
-        height: 4;
+        height: 5;
         content-align: left top;
     }
     #topbar Clock {
         width: auto;
         height: 4;
-        padding-left: 3;
-        content-align: left bottom;
+        padding-bottom: 0;
+        content-align: center bottom;
     }
-    #topbar #spacer {
+    #topbar #spacer1 {
         width: 1fr;
     }
+    #topbar #spacer2 {
+            width: 1fr;
+        }
     #topbar SysMeter {
         width: auto;
-        height: 4;
+        height: 5;
+        padding-right: 4;
+        padding-bottom: 1;
         content-align: right bottom;
     }
     #grid {
@@ -102,8 +106,9 @@ class ScoposApp(App):
     def compose(self) -> ComposeResult:
         with Horizontal(id="topbar"):
             yield Logo()
+            yield Static(id="spacer1")
             yield Clock()
-            yield Static(id="spacer")
+            yield Static(id="spacer2")
             yield SysMeter(self.monitor)
         with VerticalScroll(id="body"):
             yield Container(id="grid")
