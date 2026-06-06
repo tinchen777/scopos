@@ -2,6 +2,7 @@
 """Command line entry point: ``python -m scopos``."""
 
 from __future__ import annotations
+import os
 import argparse
 
 from . import __version__
@@ -22,7 +23,7 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument(
         "-u",
         "--user",
-        default="",
+        default=os.environ.get("USER"),
         help="Highlight this user and show their shell-script task details.",
     )
     parser.add_argument(

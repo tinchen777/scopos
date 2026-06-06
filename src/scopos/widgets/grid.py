@@ -9,9 +9,8 @@ from textual.widget import Widget
 from textual.widgets import (DataTable, Static)
 from typing import (Any, Callable, Dict, List, Optional, Tuple)
 
-from .. import __version__
 from ..metadata.utils import is_progress
-from ..monitor import (GPUInfo, Monitor, ProcInfo, fmt_gb)
+from ..monitor import (GPUInfo, Monitor, ProcInfo)
 
 
 class MemoryBar(Widget):
@@ -138,6 +137,10 @@ def _user_cell(card: "GpuCard", p: ProcInfo) -> Text:
     return Text(f"● {p.user}", style=card.monitor.color_for(p.user))
 
 
+def fmt_gb(num_bytes: float) -> str:
+    return "%.2f" % (num_bytes / (1024 ** 3))
+
+
 # The classic, show-everything layout.
 NORMAL_COLUMNS: List[_Column] = [
     _Column("PID", "PID", lambda p: p.pid, lambda c, p: str(p.pid)),
@@ -235,7 +238,8 @@ class GpuCard(Vertical):
 
     # -- sorting -----------------------------------------------------------
     def on_data_table_header_selected(
-        self, event: DataTable.HeaderSelected
+        self,
+        event: DataTable.HeaderSelected
     ):
         event.stop()
         idx = event.column_index
@@ -338,12 +342,14 @@ class GpuCard(Vertical):
             pct = mem / gpu.mem_total * 100 if gpu.mem_total else 0
             # In zen mode the watched user is highlighted in the legend even
             # though the table is filtered down to just their processes.
-            highlighted = self.zen and bool(watch) and user == watch
-            name_style = f"bold underline {color}" if highlighted else color
             legend.append("🏆 " if user == mvp else "")
-            legend.append("★ " if highlighted else "")
-            legend.append("● ", style=color)
-            legend.append(user, style=name_style)
+            if self.zen and bool(watch) and user == watch:
+                # zen mode
+                legend.append("★ ", style=color)
+                legend.append(user, style=f"bold underline {color}")
+            else:
+                # normal mode
+                legend.append(f"● {user}", style=color)
             legend.append(f" {fmt_gb(mem)} GB ({pct:.0f}%)   ")
         self.legend.update(legend)
 
@@ -390,39 +396,37 @@ class GpuCard(Vertical):
         self._anim_cells = []
 
         procs = self._visible_procs(gpu)
-        columns = self._columns_for(procs)
-        self._columns = columns
 
-        labels = []
-        for col in columns:
-            label = col.label
-            if col.key == self._sort_key:
-                label = f"{label} {'▼' if self._sort_reverse else '▲'}"
-            labels.append(label)
-        self.table.add_columns(*labels)
-
-        if self._sort_key is not None:
-            col = next(
-                (c for c in columns if c.key == self._sort_key and c.sort), None
-            )
-            if col is not None:
-                procs = sorted(procs, key=col.sort, reverse=self._sort_reverse)
-
-        if not procs:
-            empty = [Text("", style="dim") for _ in columns]
+        if procs:
+            columns = self._columns_for(procs)
+            self._columns = columns
+            # column labels
+            labels = []
+            sort_func = None
+            for col in columns:
+                label = col.label
+                if col.key == self._sort_key:
+                    label = f"{label} {'▼' if self._sort_reverse else '▲'}"
+                    if col.sort is not None:
+                        sort_func = col.sort
+                labels.append(label)
+            self.table.add_columns(*labels)
+            # sort process
+            if sort_func is not None:
+                procs = sorted(procs, key=sort_func, reverse=self._sort_reverse)
+            # rows
+            for row_idx, proc in enumerate(procs):
+                row = []
+                for col_idx, col in enumerate(columns):
+                    row.append(col.render(self, proc))
+                    if col.meta_key is not None:
+                        value = proc.meta.get(col.meta_key)
+                        if value is not None and is_progress(value) and value.get("value") is None:
+                            self._anim_cells.append((row_idx, col_idx, value))
+                self.table.add_row(*row)
+        else:
+            self.table.add_columns("")  # at least one column is needed to show the "no processes" message
             msg = "— no compute processes —"
             if self.zen and self.monitor.watch_user:
                 msg = f"— no processes for [{self.monitor.watch_user}] —"
-            empty[1 if len(columns) > 1 else 0] = Text(msg, style="dim")
-            self.table.add_row(*empty)
-            return
-
-        for row_idx, proc in enumerate(procs):
-            row = []
-            for col_idx, col in enumerate(columns):
-                row.append(col.render(self, proc))
-                if col.meta_key is not None:
-                    value = proc.meta.get(col.meta_key)
-                    if is_progress(value) and value.get("value") is None:
-                        self._anim_cells.append((row_idx, col_idx, value))
-            self.table.add_row(*row)
+            self.table.add_row(Text(msg, style="dim"))

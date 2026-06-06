@@ -91,10 +91,6 @@ class GPUInfo:
         return max(self.user_mems.items(), key=lambda kv: kv[1])[0]
 
 
-def fmt_gb(num_bytes: float) -> str:
-    return "%.2f" % (num_bytes / (1024 ** 3))
-
-
 def fmt_duration(seconds: int) -> str:
     """Format a time span with unit symbols, e.g. "2d 03h", "3h 20m", "45s"."""
     seconds = max(0, int(seconds))
@@ -113,9 +109,8 @@ def fmt_duration(seconds: int) -> str:
 class Monitor:
     """Collects GPU snapshots, keeping per-user state stable across refreshes."""
 
-    def __init__(self, watch_user: str = "", demo: bool = False):
+    def __init__(self, watch_user: str = ""):
         self.watch_user = watch_user.strip()
-        self.demo = demo
         # username -> colour, assigned on first sight and kept forever.
         self._user_colors: Dict[str, str] = {}
         self._next_color = 0
@@ -134,12 +129,12 @@ class Monitor:
 
     # -- lifecycle ---------------------------------------------------------
     def start(self):
-        if not self.demo and not self._initialised:
+        if not self._initialised:
             pn.nvmlInit()
             self._initialised = True
 
     def stop(self):
-        if not self.demo and self._initialised:
+        if self._initialised:
             try:
                 pn.nvmlShutdown()
             except Exception:
@@ -154,14 +149,8 @@ class Monitor:
 
         return {"mem": (vm.used, vm.total), "swap": (sm.used, sm.total)}
 
-    # -- collection --------------------------------------------------------
+    # -- collection ---------------------------------------------------
     def collect(self) -> List[GPUInfo]:
-        if self.demo:
-            return self._collect_demo()
-        return self._collect_real()
-
-    # -- real collection ---------------------------------------------------
-    def _collect_real(self) -> List[GPUInfo]:
         self.start()
         gpus: List[GPUInfo] = []
 
@@ -258,6 +247,14 @@ class Monitor:
                 break
             p = pp
         sname = session.name()
+        if "tmux" in sname.lower():
+            # 修改这里我想要获取tmux的session的名称作为sname
+            pass
+            
+            
+        
+        
+        
         sid = session.pid
         # session_start_time
         s_start_ts = session.create_time()
@@ -268,6 +265,20 @@ class Monitor:
 
         # number is assigned later, once every GPU has been collected.
         return ProcInfo(pid=pid, pname=name, user=user, mem=mem, runtime=runtime, cmd=cmd, runtime_sec=runtime_sec, sname=sname, sid=sid, s_start=s_start, s_start_ts=s_start_ts, meta=meta)
+
+
+class DemoMonitor(Monitor):
+    """Demo monitor for testing purposes."""
+
+    def __init__(self, watch_user: str = ""):
+        super().__init__(watch_user=watch_user)
+
+    # -- lifecycle ---------------------------------------------------------
+    def start(self):
+        pass
+
+    def stop(self):
+        pass
 
     def _demo_meta(self, rng: random.Random, script: str) -> Dict[str, Any]:
         """Fabricate the kind of fields a script would report via the API.
@@ -296,7 +307,7 @@ class Monitor:
         return meta
 
     # -- demo collection ---------------------------------------------------
-    def _collect_demo(self) -> List[GPUInfo]:
+    def collect(self) -> List[GPUInfo]:
         rng = random.Random()  # fresh randomness each tick for a "live" feel
         names = [
             "NVIDIA GeForce RTX 4090",

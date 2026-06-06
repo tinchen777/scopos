@@ -8,8 +8,7 @@ from textual.containers import (Container, Horizontal, VerticalScroll)
 from textual.widgets import (Footer, Static)
 from typing import (Dict, List)
 
-from . import __version__
-from .monitor import (GPUInfo, Monitor)
+from .monitor import (GPUInfo, Monitor, DemoMonitor)
 from .widgets.grid import GpuCard
 from .widgets.others import (Clock, Logo, SysMeter)
 
@@ -90,7 +89,11 @@ class ScoposApp(App):
     def __init__(self, watch_user: str = "", interval: int = 5, demo: bool = False, theme: str = "ansi-dark", zen: bool = False):
         super().__init__()
         self.interval = max(1, interval)
-        self.monitor = Monitor(watch_user=watch_user, demo=demo)
+        self.demo = demo
+        if demo:
+            self.monitor = DemoMonitor(watch_user=watch_user)
+        else:
+            self.monitor = Monitor(watch_user=watch_user)
         self.zen = zen
         self._cards: Dict[int, GpuCard] = {}
         self._frame: int = 0
@@ -179,18 +182,19 @@ class ScoposApp(App):
     def _update_status(self, gpus: List[GPUInfo]):
         n_proc = sum(len(g.procs) for g in gpus)
         users = {p.user for g in gpus for p in g.procs}
-        mode = "demo" if self.monitor.demo else "live"
+        mode = "demo" if self.demo else "live"
         watch = (
-            f"  ·  watching [{self.monitor.watch_user}]"
+            f"  ·  focus on [{self.monitor.watch_user}]"
             if self.monitor.watch_user
             else ""
         )
         layout = "zen" if self.zen else "normal"
+        other_layout = "normal" if self.zen else "zen"
         text = Text()
         text.append(f"{len(gpus)} GPU(s) · {n_proc} proc(s) · {len(users)} user(s)")
         text.append(
             f"  ·  refresh {self.interval}s  ·  {mode}  ·  {layout}{watch}"
-            "  ·  press z for zen  ·  click a column header to sort",
+            f"  ·  press z to {other_layout} mode",
             style="dim",
         )
         self.query_one("#status", Static).update(text)
