@@ -95,18 +95,23 @@ class ScoposApp(App):
     }
     """
 
+    # How often (seconds) indeterminate progress bars advance a frame.
+    ANIM_INTERVAL = 0.25
+
     BINDINGS = [
         ("q", "quit", "Quit"),
         ("r", "refresh", "Refresh now"),
+        ("z", "toggle_zen", "Zen mode"),
         ("d", "toggle_dark", "Light/Dark"),
     ]
 
-    def __init__(self, watch_user: str = "", interval: int = 5, demo: bool = False, theme: str = "ansi-dark"):
+    def __init__(self, watch_user: str = "", interval: int = 5, demo: bool = False, theme: str = "ansi-dark", zen: bool = False):
         super().__init__()
         self.interval = max(1, interval)
         self.monitor = Monitor(watch_user=watch_user, demo=demo)
-        self.show_detail = bool(self.monitor.watch_user)
+        self.zen = zen
         self._cards: Dict[int, GpuCard] = {}
+        self._frame: int = 0
         self.theme = theme
 
     def compose(self) -> ComposeResult:
@@ -124,6 +129,16 @@ class ScoposApp(App):
     def on_mount(self):
         self.refresh_data()
         self.set_interval(self.interval, self.refresh_data)
+        # A faster, lightweight tick that only animates indeterminate progress
+        # bars (it updates just those cells, not the whole table).
+        self.set_interval(self.ANIM_INTERVAL, self._progress_tick)
+
+    def _progress_tick(self):
+        if not self.zen:
+            return
+        self._frame += 1
+        for card in self._cards.values():
+            card.animate_progress(self._frame)
 
     def on_resize(self):
         self._relayout_columns()
@@ -141,6 +156,16 @@ class ScoposApp(App):
     # -- data --------------------------------------------------------------
     def action_refresh(self):
         self.refresh_data()
+
+    def action_toggle_zen(self):
+        """Switch between the normal layout and the focused 'zen' layout."""
+        self.zen = not self.zen
+        for card in self._cards.values():
+            card.set_zen(self.zen)
+        if self._cards:
+            self._update_status(
+                [c._gpu for c in self._cards.values() if c._gpu is not None]
+            )
 
     def refresh_data(self):
         try:
@@ -164,7 +189,7 @@ class ScoposApp(App):
         grid.remove_children()
         self._cards.clear()
         for gpu in gpus:
-            card = GpuCard(self.monitor, self.show_detail)
+            card = GpuCard(self.monitor, zen=self.zen)
             self._cards[gpu.index] = card
             grid.mount(card)
         self.call_after_refresh(self._relayout_columns)
@@ -178,11 +203,12 @@ class ScoposApp(App):
             if self.monitor.watch_user
             else ""
         )
+        layout = "zen" if self.zen else "normal"
         text = Text()
         text.append(f"{len(gpus)} GPU(s) · {n_proc} proc(s) · {len(users)} user(s)")
         text.append(
-            f"  ·  refresh {self.interval}s  ·  {mode}{watch}"
-            "  ·  click a column header to sort",
+            f"  ·  refresh {self.interval}s  ·  {mode}  ·  {layout}{watch}"
+            "  ·  press z for zen  ·  click a column header to sort",
             style="dim",
         )
         self.query_one("#status", Static).update(text)

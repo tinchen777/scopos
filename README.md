@@ -71,6 +71,60 @@ scopos -i 2
 scopos --demo
 ```
 
+### start in zen (focus) mode
+
+```bash
+scopos -u alice --zen
+```
+
+---
+
+## Zen mode
+
+Press <kbd>z</kbd> at any time (or start with `--zen`) to toggle **zen mode**, a
+focused layout meant to be paired with `-u/--user`:
+
+- Each GPU's **table** lists only the watched user's processes.
+- The per-GPU **bar and legend still show every user** — the watched user is
+  highlighted (`★`, bold) so you keep the full picture at a glance.
+- The table drops the `USER` and `S.START` columns and instead shows the
+  **live fields each process reports** through the Python API below — including
+  animated progress bars.
+
+## Python API
+
+`scopos` doubles as a tiny library so your scripts can push live status to the
+monitor. Importing it is cheap — no Textual or NVIDIA driver required.
+
+```python
+import scopos
+
+# Report plain fields (merged into this process's metadata):
+scopos.report(stage="train", loss=0.1234, acc="92.5%")
+
+# Report a progress bar. scopos renders it as a live bar in zen mode:
+for step in range(total_steps):
+    scopos.report(progress=scopos.progress(step, total_steps))  # e.g. 37/100
+    ...
+
+# A fraction in [0, 1] works too, and an indeterminate (animated) bar:
+scopos.report(loading=scopos.progress())            # bouncing "…"
+scopos.report(warmup=scopos.progress(0.5, label="halfway"))
+
+# Drop a field by reporting None; replace everything with set(...):
+scopos.report(loss=None)
+scopos.set(stage="done")
+
+# Or scope a run and clean up automatically:
+with scopos.session(stage="train"):
+    train()   # metadata file removed on exit
+```
+
+Each process writes `~/.scopos/metadata/<pid>.json`; `scopos` reads it back and,
+in zen mode, shows every reported field as a column next to that process. The
+file is removed automatically when your program exits (`atexit`). Set
+`$SCOPOS_HOME` to relocate the `.scopos` directory.
+
 ---
 
 ## Requirements
