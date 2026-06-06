@@ -13,15 +13,19 @@ You'll see this process appear with ``stage``, ``loss`` and an ``epoch``
 progress bar updating live, then disappear when the script exits.
 """
 
+import sys
+sys.path.insert(0, "/data/tianzhen/my_packages/scopos/src")
+
 import random
 import time
+# from tqdm import tqdm
 
 import scopos
 
 TOTAL_EPOCHS = 50
 
 
-def main() -> None:
+def main():
     # An indeterminate (animated) bar while we "load data".
     scopos.report(stage="warmup", epoch=scopos.progress(label="loading data"))
     time.sleep(3)
@@ -29,6 +33,7 @@ def main() -> None:
     loss = 2.5
     for epoch in range(TOTAL_EPOCHS):
         loss *= random.uniform(0.92, 0.99)
+        print(f"Epoch {epoch+1}/{TOTAL_EPOCHS}, loss={loss:.4f}")
         scopos.report(
             stage="train",
             epoch=scopos.progress(epoch + 1, TOTAL_EPOCHS),  # e.g. 12/50

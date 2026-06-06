@@ -2,7 +2,6 @@
 """The Scopos Textual application."""
 
 from __future__ import annotations
-import time
 from rich.text import Text
 from textual.app import (App, ComposeResult)
 from textual.containers import (Container, Horizontal, VerticalScroll)
@@ -11,26 +10,9 @@ from typing import (Dict, List)
 
 from . import __version__
 from .monitor import (GPUInfo, Monitor)
-from .widgets import (GpuCard, Logo, SysMeter)
+from .widgets.grid import GpuCard
+from .widgets.others import (Clock, Logo, SysMeter)
 
-
-class Clock(Static):
-    """Date / time / version, pinned top-right."""
-
-    def __init__(self, interval: int):
-        super().__init__()
-        self.interval = interval
-
-    def on_mount(self):
-        self.update_clock()
-        self.set_interval(self.interval, self.update_clock)
-
-    def update_clock(self):
-        now = time.localtime()
-        text = Text(justify="left")
-        text.append(time.strftime("%Y-%m-%d  ", now), style="bold")
-        text.append(time.strftime("%H:%M:%S", now), style="bold cyan")
-        self.update(text)
 
 
 class ScoposApp(App):

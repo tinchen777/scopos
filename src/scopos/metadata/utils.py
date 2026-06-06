@@ -18,7 +18,7 @@ import os
 import tempfile
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import (Any, Dict, Optional)
 
 # Marker key identifying a value as a progress bar rather than a plain field.
 # The TUI looks for this key to decide whether to render an animated bar.
@@ -110,7 +110,7 @@ def read_fields(pid: int) -> Dict[str, Any]:
 
 
 # -- writing ---------------------------------------------------------------
-def write_fields(pid: int, fields: Dict[str, Any], merge: bool = True) -> None:
+def write_fields(pid: int, fields: Dict[str, Any], merge: bool = True):
     """Persist ``fields`` for ``pid`` atomically.
 
     With ``merge=True`` (the default) the new fields are layered on top of
@@ -126,7 +126,7 @@ def write_fields(pid: int, fields: Dict[str, Any], merge: bool = True) -> None:
     _atomic_write(metadata_path(pid), payload)
 
 
-def clear(pid: int) -> None:
+def clear(pid: int):
     """Remove the metadata file for ``pid`` (no error if it is missing)."""
     try:
         os.remove(metadata_path(pid))
@@ -134,7 +134,7 @@ def clear(pid: int) -> None:
         pass
 
 
-def _atomic_write(path: Path, payload: Dict[str, Any]) -> None:
+def _atomic_write(path: Path, payload: Dict[str, Any]):
     text = json.dumps(payload, ensure_ascii=False, default=str)
     fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".tmp-", suffix=".json")
     try:

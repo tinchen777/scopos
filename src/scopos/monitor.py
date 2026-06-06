@@ -10,13 +10,12 @@ process numbering, exactly like the original CLI did.
 from __future__ import annotations
 import pynvml as pn
 import psutil
-import re
 import time
 import random
 from dataclasses import (dataclass, field)
 from typing import (Any, Dict, List, Tuple, Optional)
 
-from . import metadata
+from .metadata.utils import (make_progress, read_fields)
 
 # A palette of visually distinct colours assigned to users in order of
 # first appearance. Names are Rich/Textual colour names so they render the
@@ -200,7 +199,7 @@ class Monitor:
         self._assign_numbers(gpus)
         return gpus
 
-    def _assign_numbers(self, gpus: List[GPUInfo]) -> None:
+    def _assign_numbers(self, gpus: List[GPUInfo]):
         """Fill in each process's "parentNo-childNo" label.
 
         Numbering is per user and spans every GPU: a user's parent processes
@@ -265,51 +264,10 @@ class Monitor:
         s_start = time.strftime("%y-%m-%d %H:%M:%S", time.localtime(s_start_ts))
 
         # Fields this process reported to Scopos, if any.
-        meta = metadata.read_fields(pid)
+        meta = read_fields(pid)
 
         # number is assigned later, once every GPU has been collected.
         return ProcInfo(pid=pid, pname=name, user=user, mem=mem, runtime=runtime, cmd=cmd, runtime_sec=runtime_sec, sname=sname, sid=sid, s_start=s_start, s_start_ts=s_start_ts, meta=meta)
-
-    def _script_detail(self, p, pp) -> str:
-        """Best-effort reconstruction of which task in a shell script is running.
-
-        Ported from the original tool; wrapped so any failure simply shows "?".
-        """
-        try:
-            pp_file_path = pp.open_files()[0].path
-            pp_file_name = pp_file_path.rsplit("/", maxsplit=1)[-1]
-            cur_cmd = " ".join(p.cmdline())
-            total_task = 0
-            cur_task = -1
-            bash_args: Dict[str, str] = {}
-
-            def replace_bash_args(cmd: str) -> str:
-                for arg, val in bash_args.items():
-                    rx = re.compile(r"\$(\{" + arg + r"\}|" + arg + r"(?!_))")
-                    cmd = rx.sub(val, cmd)
-                return cmd.replace('"', "")
-
-            with open(pp_file_path, "r", newline=None) as fh:
-                for cmd in fh:
-                    if cmd.startswith("#"):
-                        continue
-                    cmd = cmd.strip("\n")
-                    if cmd.startswith(p.name()):
-                        total_task += 1
-                        if replace_bash_args(cmd) == cur_cmd:
-                            cur_task = total_task
-                    elif "=" in cmd:
-                        key, raw = cmd.split("=", maxsplit=1)
-                        if "$" in raw:
-                            val = replace_bash_args(raw)
-                            if "$" in val:
-                                raise NotImplementedError
-                        else:
-                            val = raw
-                        bash_args[key] = val.strip('"')
-            return f"{pp_file_name} [{cur_task}/{total_task}]"
-        except Exception:
-            return "?"
 
     def _demo_meta(self, rng: random.Random, script: str) -> Dict[str, Any]:
         """Fabricate the kind of fields a script would report via the API.
@@ -324,13 +282,13 @@ class Monitor:
         stage = rng.choice(["warmup", "train", "train", "eval"])
         if stage == "warmup":
             # Indeterminate bar -> animated marquee in the TUI.
-            return {"stage": stage, "progress": metadata.make_progress(label="loading data")}
+            return {"stage": stage, "progress": make_progress(label="loading data")}
         total = rng.choice([50, 100, 200])
         done = rng.randint(0, total)
         meta: Dict[str, Any] = {
             "stage": stage,
             "task": script.replace(".py", ""),
-            "epoch": metadata.make_progress(done, total),
+            "epoch": make_progress(done, total),
             "loss": f"{rng.uniform(0.05, 2.5):.4f}",
         }
         if stage == "eval":

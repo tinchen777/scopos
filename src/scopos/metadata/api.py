@@ -28,21 +28,21 @@ import atexit
 import os
 from typing import Any
 
-from . import metadata
+from . import utils
 
 __all__ = ["report", "update", "set", "progress", "clear", "session", "metadata_file"]
 
 _cleanup_registered = False
 
 
-def _register_cleanup() -> None:
+def _register_cleanup():
     global _cleanup_registered
     if not _cleanup_registered:
         atexit.register(clear)
         _cleanup_registered = True
 
 
-def report(**fields: Any) -> None:
+def report(**fields: Any):
     """Report (merge) one or more fields for the current process.
 
     Existing fields are kept; fields passed here are added or overwritten.
@@ -53,13 +53,13 @@ def report(**fields: Any) -> None:
     add = {k: v for k, v in fields.items() if v is not None}
     if drop:
         # Read-modify-write so explicit Nones remove fields rather than store them.
-        merged = metadata.read_fields(pid)
+        merged = utils.read_fields(pid)
         merged.update(add)
         for k in drop:
             merged.pop(k, None)
-        metadata.write_fields(pid, merged, merge=False)
+        utils.write_fields(pid, merged, merge=False)
     else:
-        metadata.write_fields(pid, add, merge=True)
+        utils.write_fields(pid, add, merge=True)
     _register_cleanup()
 
 
@@ -67,9 +67,9 @@ def report(**fields: Any) -> None:
 update = report
 
 
-def set(**fields: Any) -> None:  # noqa: A001 - intentional public name
+def set(**fields: Any):  # noqa: A001 - intentional public name
     """Replace *all* reported fields with ``fields`` for the current process."""
-    metadata.write_fields(os.getpid(), dict(fields), merge=False)
+    utils.write_fields(os.getpid(), dict(fields), merge=False)
     _register_cleanup()
 
 
@@ -78,26 +78,23 @@ def progress(value=None, total=None, label=None, color=None):
 
     See :func:`scopos.metadata.make_progress` for the accepted forms.
     """
-    return metadata.make_progress(value=value, total=total, label=label, color=color)
+    return utils.make_progress(value=value, total=total, label=label, color=color)
 
 
-def clear() -> None:
+def clear():
     """Remove this process's metadata file (called automatically at exit)."""
-    metadata.clear(os.getpid())
+    utils.clear(os.getpid())
 
 
 def metadata_file() -> str:
     """Return the path of this process's metadata file (may not exist yet)."""
-    return str(metadata.metadata_path(os.getpid()))
+    return str(utils.metadata_path(os.getpid()))
 
 
 class session:
     """Context manager that reports fields on entry and clears them on exit.
-
-    ::
-
-        with scopos.session(stage="train"):
-            train()
+    >>> with scopos.session(stage="train"):
+    >>>     train()
     """
 
     def __init__(self, **fields: Any):

@@ -9,73 +9,9 @@ from textual.widget import Widget
 from textual.widgets import (DataTable, Static)
 from typing import (Any, Callable, Dict, List, Optional, Tuple)
 
-from . import __version__, metadata
-from .monitor import (GPUInfo, Monitor, ProcInfo, fmt_gb)
-
-
-LOGO = r"""  ___   ___  _____  ____  _____  ___  
- / __) / __)(  _  )(  _ \(  _  )/ __) 
- \__ \( (__  )(_)(  )___/ )(_)( \__ \ 
- (___/ \___)(_____)(__)  (_____)(___/ """
-
-
-class Logo(Static):
-    """The SCOPOS ASCII logo, pinned top-left."""
-
-    def __init__(self):
-        text = Text(LOGO, style="bold cyan")
-        text.append(f"  v{__version__}", style="dim white")
-        super().__init__(text)
-
-
-class SysMeter(Static):
-    """Compact host RAM / swap usage bars, shown next to the logo."""
-
-    DEFAULT_CSS = """
-    SysMeter {
-        width: auto;
-        height: auto;
-    }
-    """
-
-    BAR_WIDTH = 26
-
-    def __init__(self, monitor: Monitor) -> None:
-        super().__init__()
-        self.monitor = monitor
-
-    def on_mount(self) -> None:
-        self.refresh_stats()
-        self.set_interval(2.0, self.refresh_stats)
-
-    def refresh_stats(self) -> None:
-        stats = self.monitor.system_stats()
-        text = Text(justify="right")
-        text.append(self._line("Mem", *stats["mem"]))
-        text.append("\n")
-        text.append(self._line("Swp", *stats["swap"]))
-        self.update(text)
-
-    def _line(self, label: str, used: float, total: float) -> Text:
-        total = total or 1
-        frac = max(0.0, min(1.0, used / total))
-        if frac >= 0.85:
-            color = "red"
-        elif frac >= 0.6:
-            color = "yellow"
-        else:
-            color = "green"
-        filled = round(frac * self.BAR_WIDTH)
-        gb = 1024 ** 3
-        line = Text()
-        line.append(f"{label} ", style="bold")
-        line.append("▕", style="grey50")
-        line.append("█" * filled, style=color)
-        line.append("░" * (self.BAR_WIDTH - filled), style="grey35")
-        line.append("▏", style="grey50")
-        line.append(f" {used / gb:5.1f} / {total / gb:5.1f} GB", style="dim")
-        line.append(f" {frac * 100:3.0f}%", style=color)
-        return line
+from .. import __version__
+from ..metadata.utils import is_progress
+from ..monitor import (GPUInfo, Monitor, ProcInfo, fmt_gb)
 
 
 class MemoryBar(Widget):
@@ -190,7 +126,7 @@ class _Column:
         sort: Optional[Callable],
         render: Callable[["GpuCard", ProcInfo], Any],
         meta_key: Optional[str] = None,
-    ) -> None:
+    ):
         self.key = key
         self.label = label
         self.sort = sort
@@ -230,7 +166,7 @@ DESC_FIRST_KEYS = {"PID", "MEM/GB", "RUNTIME", "S.START"}
 
 def _meta_sort_value(value: Any):
     """A sort key for a metadata cell that never compares across types."""
-    if metadata.is_progress(value):
+    if is_progress(value):
         v = value.get("value")
         return (0, -1.0 if v is None else float(v))
     if value is None:
@@ -262,7 +198,7 @@ class GpuCard(Vertical):
     }
     """
 
-    def __init__(self, monitor: Monitor, zen: bool = False) -> None:
+    def __init__(self, monitor: Monitor, zen: bool = False):
         super().__init__()
         self.monitor = monitor
         self.zen = zen
@@ -285,12 +221,12 @@ class GpuCard(Vertical):
         yield self.legend
         yield self.table
 
-    def on_mount(self) -> None:
+    def on_mount(self):
         if self._pending is not None:
             self._apply(self._pending)
 
     # -- mode --------------------------------------------------------------
-    def set_zen(self, zen: bool) -> None:
+    def set_zen(self, zen: bool):
         if zen == self.zen:
             return
         self.zen = zen
@@ -300,7 +236,7 @@ class GpuCard(Vertical):
     # -- sorting -----------------------------------------------------------
     def on_data_table_header_selected(
         self, event: DataTable.HeaderSelected
-    ) -> None:
+    ):
         event.stop()
         idx = event.column_index
         if idx >= len(self._columns):
@@ -317,7 +253,7 @@ class GpuCard(Vertical):
             self._update_table(self._gpu)
 
     # -- animation ---------------------------------------------------------
-    def animate_progress(self, frame: int) -> None:
+    def animate_progress(self, frame: int):
         """Re-render indeterminate progress cells so their blocks move."""
         self._frame = frame
         if not self._anim_cells:
@@ -435,7 +371,7 @@ class GpuCard(Vertical):
             value = proc.meta.get(_key)
             if value is None:
                 return Text("")
-            if metadata.is_progress(value):
+            if is_progress(value):
                 return render_progress(value, card._frame)
             return Text(str(value))
 
@@ -447,7 +383,7 @@ class GpuCard(Vertical):
             meta_key=key,
         )
 
-    def _update_table(self, gpu: GPUInfo) -> None:
+    def _update_table(self, gpu: GPUInfo):
         # Rebuild columns each time so the sort arrow can move between headers
         # and zen-mode metadata columns can appear/disappear with the data.
         self.table.clear(columns=True)
@@ -487,6 +423,6 @@ class GpuCard(Vertical):
                 row.append(col.render(self, proc))
                 if col.meta_key is not None:
                     value = proc.meta.get(col.meta_key)
-                    if metadata.is_progress(value) and value.get("value") is None:
+                    if is_progress(value) and value.get("value") is None:
                         self._anim_cells.append((row_idx, col_idx, value))
             self.table.add_row(*row)
