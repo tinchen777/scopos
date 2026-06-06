@@ -95,6 +95,29 @@ def _trim(num: float):
 
 
 # -- reading ---------------------------------------------------------------
+def iter_pids() -> list:
+    """Return the PIDs that currently have a metadata file, newest first.
+
+    Used by the TUI to discover processes that reported to Scopos but may not
+    (yet) appear on any GPU.  Missing directory / unreadable names are ignored.
+    """
+    d = metadata_dir()
+    pids = []
+    try:
+        entries = list(d.iterdir())
+    except OSError:
+        return pids
+    for path in entries:
+        if path.suffix != ".json" or path.name.startswith(".tmp-"):
+            continue
+        try:
+            pids.append((path.stat().st_mtime, int(path.stem)))
+        except (ValueError, OSError):
+            continue
+    pids.sort(reverse=True)
+    return [pid for _, pid in pids]
+
+
 def read_fields(pid: int) -> Dict[str, Any]:
     """Return the fields reported by ``pid``; ``{}`` if none / unreadable."""
     try:

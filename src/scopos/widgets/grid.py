@@ -2,7 +2,9 @@
 """Reusable Textual widgets for Scopos."""
 
 from __future__ import annotations
+import psutil
 from rich.text import Text
+from textual import events
 from textual.containers import Vertical
 from textual.coordinate import Coordinate
 from textual.widget import Widget
@@ -10,7 +12,8 @@ from textual.widgets import (DataTable, Static)
 from typing import (Any, Callable, Dict, List, Optional, Tuple)
 
 from ..metadata.utils import is_progress
-from ..monitor import (GPUInfo, Monitor, ProcInfo)
+from ..monitor import (GPUInfo, Monitor, ProcInfo, fmt_duration)
+from .dialogs import (ConfirmScreen, ContextMenu)
 
 
 class MemoryBar(Widget):
@@ -104,6 +107,11 @@ def render_progress(data: Dict[str, Any], frame: int = 0, width: int = PROGRESS_
         bar.append("▏", style="grey50")
         shown = label if label is not None else f"{frac * 100:.0f}%"
         bar.append(f" {shown}", style="dim")
+        # ETA estimated by the Monitor from how fast the bar has been moving.
+        eta = data.get("eta")
+        if eta is not None:
+            tail = "done" if eta <= 0 else f"~{fmt_duration(eta)}"
+            bar.append(f" · {tail}", style="green" if eta <= 0 else "cyan")
     return bar
 
 
@@ -167,6 +175,19 @@ ZEN_COMMAND = NORMAL_COLUMNS[7]
 DESC_FIRST_KEYS = {"PID", "MEM/GB", "RUNTIME", "S.START"}
 
 
+def _progress_text(data: Dict[str, Any]) -> str:
+    """A plain-text summary of a progress field, for tooltips / clipboard."""
+    value = data.get("value")
+    label = data.get("label")
+    if value is None:
+        return label or "…"
+    shown = label if label is not None else f"{value * 100:.0f}%"
+    eta = data.get("eta")
+    if eta is not None:
+        shown += " (done)" if eta <= 0 else f" (~{fmt_duration(eta)})"
+    return shown
+
+
 def _meta_sort_value(value: Any):
     """A sort key for a metadata cell that never compares across types."""
     if is_progress(value):
@@ -201,32 +222,42 @@ class GpuCard(Vertical):
     }
     """
 
-    def __init__(self, monitor: Monitor, zen: bool = False):
+    def __init__(self, monitor: Monitor, zen: bool = False, pending: bool = False, danger: bool = False):
         super().__init__()
         self.monitor = monitor
         self.zen = zen
+        # ``pending`` cards list a user's reported-but-not-yet-on-GPU processes.
+        self.is_pending = pending
+        # ``danger`` only changes what the right-click menu offers (adds Kill).
+        self.danger = danger
         self.stats = Static(classes="stats")
         self.bar = MemoryBar()
         self.legend = Static(classes="legend")
         self.table = DataTable(zebra_stripes=True, cursor_type="row")
-        self._pending: Optional[GPUInfo] = None
+        self._deferred: Optional[GPUInfo] = None  # update arriving before mount
         self._gpu: Optional[GPUInfo] = None
         self._sort_key: Optional[str] = None
         self._sort_reverse: bool = False
         self._columns: List[_Column] = NORMAL_COLUMNS
+        # The processes currently shown, in row order, for hover/right-click.
+        self._row_procs: List[ProcInfo] = []
         # (row, column, progress-data) for indeterminate bars we animate.
         self._anim_cells: List[Tuple[int, int, Dict[str, Any]]] = []
         self._frame: int = 0
 
     def compose(self):
         yield self.stats
-        yield self.bar
-        yield self.legend
+        if not self.is_pending:
+            yield self.bar
+            yield self.legend
         yield self.table
 
     def on_mount(self):
-        if self._pending is not None:
-            self._apply(self._pending)
+        # Keep the table's tooltip in sync with the cell under the mouse so a
+        # long, truncated column can be read in full just by hovering it.
+        self.watch(self.table, "hover_coordinate", self._hover_changed)
+        if self._deferred is not None:
+            self._apply(self._deferred)
 
     # -- mode --------------------------------------------------------------
     def set_zen(self, zen: bool):
@@ -278,18 +309,29 @@ class GpuCard(Vertical):
         # A card may be updated in the same frame it is mounted, before its
         # columns exist; defer until on_mount in that case.
         if not self.is_mounted:
-            self._pending = gpu
+            self._deferred = gpu
             return
         self._apply(gpu)
 
     def _apply(self, gpu: GPUInfo):
-        self._pending = None
+        self._deferred = None
         self._gpu = gpu
-        self.border_title = f" # {gpu.index}  {gpu.name} "
-        self._update_stats(gpu)
-        self._update_bar(gpu)
-        self._update_legend(gpu)
+        if self.is_pending:
+            self.border_title = " ⏳ PENDING  ·  not yet on GPU "
+            self._update_pending_stats(gpu)
+        else:
+            self.border_title = f" # {gpu.index}  {gpu.name} "
+            self._update_stats(gpu)
+            self._update_bar(gpu)
+            self._update_legend(gpu)
         self._update_table(gpu)
+
+    def _update_pending_stats(self, gpu: GPUInfo):
+        line = Text(no_wrap=True, overflow="ellipsis")
+        line.append("[PENDING] ", style="bold yellow")
+        line.append(f"{len(gpu.procs)} proc(s)", style="bold")
+        line.append("  ·  reported to scopos, waiting to allocate GPU memory", style="dim")
+        self.stats.update(line)
 
     def _update_stats(self, gpu: GPUInfo):
         rate = gpu.idle_rate
@@ -356,12 +398,13 @@ class GpuCard(Vertical):
     # -- table helpers -----------------------------------------------------
     def _visible_procs(self, gpu: GPUInfo) -> List[ProcInfo]:
         """Processes to list in the table: filtered to the watched user in zen."""
-        if self.zen and self.monitor.watch_user:
+        if not self.is_pending and self.zen and self.monitor.watch_user:
             return [p for p in gpu.procs if p.user == self.monitor.watch_user]
         return list(gpu.procs)
 
     def _columns_for(self, procs: List[ProcInfo]) -> List[_Column]:
-        if not self.zen:
+        # Pending cards are metadata-centric, so they always use the zen columns.
+        if not self.zen and not self.is_pending:
             return NORMAL_COLUMNS
         # Build one column per reported field, in first-seen order across the
         # visible processes, then keep COMMAND last.
@@ -414,6 +457,7 @@ class GpuCard(Vertical):
             # sort process
             if sort_func is not None:
                 procs = sorted(procs, key=sort_func, reverse=self._sort_reverse)
+            self._row_procs = procs
             # rows
             for row_idx, proc in enumerate(procs):
                 row = []
@@ -425,8 +469,106 @@ class GpuCard(Vertical):
                             self._anim_cells.append((row_idx, col_idx, value))
                 self.table.add_row(*row)
         else:
+            self._row_procs = []
             self.table.add_columns("")  # at least one column is needed to show the "no processes" message
             msg = "— no compute processes —"
             if self.zen and self.monitor.watch_user:
                 msg = f"— no processes for [{self.monitor.watch_user}] —"
             self.table.add_row(Text(msg, style="dim"))
+
+    # -- interaction: hover, right-click menu, kill ------------------------
+    def set_danger(self, danger: bool):
+        """Danger mode only affects whether the menu offers Kill (no re-render)."""
+        self.danger = danger
+
+    def _hover_changed(self, coord: Optional[Coordinate]):
+        """Show the full text of the hovered cell as the table's tooltip."""
+        table = self.table
+        if coord is None or not self._row_procs:
+            table.tooltip = None
+            return
+        try:
+            value = table.get_cell_at(coord)
+        except Exception:
+            table.tooltip = None
+            return
+        text = value.plain if isinstance(value, Text) else str(value)
+        table.tooltip = text or None
+
+    def on_mouse_down(self, event: events.MouseDown):
+        # Right-click (button 3) on a process row opens the context menu.
+        if event.button != 3:
+            return
+        coord = self.table.hover_coordinate
+        if coord is None or not (0 <= coord.row < len(self._row_procs)):
+            return
+        event.stop()
+        event.prevent_default()
+        proc = self._row_procs[coord.row]
+        options: List[Tuple[str, str]] = [("copy", "📋  Copy row info")]
+        if self.danger:
+            options.append(("kill", f"💀  Kill process (PID {proc.pid})"))
+        x = getattr(event, "screen_x", event.x)
+        y = getattr(event, "screen_y", event.y)
+        self.app.push_screen(
+            ContextMenu(options, x, y),
+            lambda choice, p=proc: self._on_menu(choice, p),
+        )
+
+    def _on_menu(self, choice: Optional[str], proc: ProcInfo):
+        if choice == "copy":
+            self._copy_proc(proc)
+        elif choice == "kill":
+            self._confirm_kill(proc)
+
+    def _row_info(self, proc: ProcInfo) -> str:
+        lines = []
+        for col in self._columns:
+            lines.append(f"{col.label}: {self._clean_cell(col, proc)}".rstrip())
+        return "\n".join(lines)
+
+    def _clean_cell(self, col: _Column, proc: ProcInfo) -> str:
+        """A clean, plain-text value for a cell (progress bars become text)."""
+        if col.meta_key is not None:
+            raw = proc.meta.get(col.meta_key)
+            if is_progress(raw):
+                return _progress_text(raw)
+            return "" if raw is None else str(raw)
+        value = col.render(self, proc)
+        return value.plain if isinstance(value, Text) else str(value)
+
+    def _copy_proc(self, proc: ProcInfo):
+        info = self._row_info(proc)
+        try:
+            self.app.copy_to_clipboard(info)
+            self._notify(f"Copied info for PID {proc.pid}")
+        except Exception as exc:
+            self._notify(f"Copy failed: {exc}", error=True)
+
+    def _confirm_kill(self, proc: ProcInfo):
+        msg = (
+            f"⚠  Kill process PID {proc.pid} ({proc.user})?\n\n"
+            f"{proc.cmd}\n\n"
+            "This sends a terminate signal to the process and cannot be undone."
+        )
+        self.app.push_screen(
+            ConfirmScreen(msg),
+            lambda ok, p=proc: self._do_kill(p) if ok else None,
+        )
+
+    def _do_kill(self, proc: ProcInfo):
+        try:
+            psutil.Process(proc.pid).terminate()
+            self._notify(f"Sent terminate signal to PID {proc.pid}")
+        except psutil.NoSuchProcess:
+            self._notify(f"Process {proc.pid} no longer exists")
+        except psutil.AccessDenied:
+            self._notify(f"Permission denied: cannot kill PID {proc.pid}", error=True)
+        except Exception as exc:
+            self._notify(f"Kill failed: {exc}", error=True)
+
+    def _notify(self, message: str, error: bool = False):
+        try:
+            self.app.notify(message, severity="error" if error else "information")
+        except Exception:
+            pass

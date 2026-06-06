@@ -90,6 +90,27 @@ focused layout meant to be paired with `-u/--user`:
 - The table drops the `USER` and `S.START` columns and instead shows the
   **live fields each process reports** through the Python API below — including
   animated progress bars.
+- A **`PENDING` card** appears whenever the watched user has a process that has
+  reported to scopos but hasn't allocated GPU memory yet (e.g. still importing
+  CUDA or loading data). Its columns match the GPU cards; once the job touches
+  the GPU it disappears from `PENDING` and shows up under its GPU automatically.
+
+The `SESSION` column shows the **tmux session name** (`tmux:<name>`) for
+tmux-managed processes — for your own sessions; other users' tmux sockets
+aren't readable, so those fall back to `tmux`. Determinate progress bars also
+show an **ETA** (`· ~3m 20s`) estimated from how fast the bar is advancing.
+
+## Mouse & shortcuts
+
+- **Hover** any cell to see its full, untruncated content as a tooltip — handy
+  for long `COMMAND` or `SESSION` values.
+- **Right-click** a process row for a menu: *Copy row info* copies that row's
+  fields to the clipboard.
+- **Danger mode** (<kbd>ctrl</kbd>+<kbd>shift</kbd>+<kbd>k</kbd>) is an
+  independent toggle that works in both normal and zen layouts. While it is on,
+  the right-click menu also offers **Kill process**, which asks for confirmation
+  before sending a terminate signal. The status bar shows a red `⚠ DANGER`
+  reminder while it is armed.
 
 ## Python API
 

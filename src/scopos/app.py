@@ -6,7 +6,7 @@ from rich.text import Text
 from textual.app import (App, ComposeResult)
 from textual.containers import (Container, Horizontal, VerticalScroll)
 from textual.widgets import (Footer, Static)
-from typing import (Dict, List)
+from typing import (Dict, List, Optional)
 
 from .monitor import (GPUInfo, Monitor, DemoMonitor)
 from .widgets.grid import GpuCard
@@ -84,6 +84,9 @@ class ScoposApp(App):
         ("r", "refresh", "Refresh now"),
         ("z", "toggle_zen", "Zen mode"),
         ("d", "toggle_dark", "Light/Dark"),
+        # Deliberately awkward so it isn't hit by accident: it arms right-click
+        # process killing. Confirmed again per-kill by a dialog.
+        ("ctrl+shift+k", "toggle_danger", "Danger/Kill mode"),
     ]
 
     def __init__(self, watch_user: str = "", interval: int = 5, demo: bool = False, theme: str = "ansi-dark", zen: bool = False):
@@ -95,7 +98,11 @@ class ScoposApp(App):
         else:
             self.monitor = Monitor(watch_user=watch_user)
         self.zen = zen
+        # When armed, the right-click menu offers "Kill"; off by default.
+        self.danger = False
         self._cards: Dict[int, GpuCard] = {}
+        # The optional PENDING card (reported-but-not-yet-on-GPU processes).
+        self._pending_card: Optional[GpuCard] = None
         self._frame: int = 0
         self.theme = theme
 
@@ -124,6 +131,8 @@ class ScoposApp(App):
         self._frame += 1
         for card in self._cards.values():
             card.animate_progress(self._frame)
+        if self._pending_card is not None:
+            self._pending_card.animate_progress(self._frame)
 
     def on_resize(self):
         self._relayout_columns()
@@ -145,12 +154,18 @@ class ScoposApp(App):
     def action_toggle_zen(self):
         """Switch between the normal layout and the focused 'zen' layout."""
         self.zen = not self.zen
-        for card in self._cards.values():
-            card.set_zen(self.zen)
-        if self._cards:
-            self._update_status(
-                [c._gpu for c in self._cards.values() if c._gpu is not None]
-            )
+        self.refresh_data()
+
+    def action_toggle_danger(self):
+        """Arm/disarm right-click process killing (still confirmed per-kill)."""
+        self.danger = not self.danger
+        self.refresh_data()
+        self.notify(
+            "DANGER mode ON — right-click a process to Kill it (you'll be asked to confirm)"
+            if self.danger else "DANGER mode off",
+            severity="warning" if self.danger else "information",
+            timeout=4,
+        )
 
     def refresh_data(self):
         try:
@@ -161,23 +176,55 @@ class ScoposApp(App):
             )
             return
         self._sync_cards(gpus)
+        for card in self._cards.values():
+            card.set_zen(self.zen)
+            card.set_danger(self.danger)
         for gpu in gpus:
             self._cards[gpu.index].update(gpu)
+        self._sync_pending(gpus)
         self._update_status(gpus)
 
     def _sync_cards(self, gpus: List[GPUInfo]):
         wanted = {g.index for g in gpus}
         if wanted == set(self._cards):
             return
-        # GPU set changed (first run, or hot-plug): rebuild the grid.
+        # GPU set changed (first run, or hot-plug): rebuild the grid. This also
+        # drops the pending card, which _sync_pending re-creates afterwards.
         grid = self.query_one("#grid")
         grid.remove_children()
         self._cards.clear()
+        self._pending_card = None
         for gpu in gpus:
-            card = GpuCard(self.monitor, zen=self.zen)
+            card = GpuCard(self.monitor, zen=self.zen, danger=self.danger)
             self._cards[gpu.index] = card
             grid.mount(card)
         self.call_after_refresh(self._relayout_columns)
+
+    def _sync_pending(self, gpus: List[GPUInfo]):
+        """Create/update/remove the PENDING card (zen + watched user only)."""
+        pending: List = []
+        if self.zen and self.monitor.watch_user:
+            gpu_pids = {p.pid for g in gpus for p in g.procs}
+            try:
+                pending = self.monitor.collect_pending(gpu_pids)
+            except Exception:
+                pending = []
+        if pending:
+            if self._pending_card is None:
+                card = GpuCard(self.monitor, zen=True, pending=True, danger=self.danger)
+                self._pending_card = card
+                grid = self.query_one("#grid")
+                if self._cards:
+                    grid.mount(card, before=next(iter(self._cards.values())))
+                else:
+                    grid.mount(card)
+                self.call_after_refresh(self._relayout_columns)
+            self._pending_card.set_danger(self.danger)
+            self._pending_card.update(GPUInfo(-1, "PENDING", 0, 0, 0, -1, -1, procs=pending))
+        elif self._pending_card is not None:
+            self._pending_card.remove()
+            self._pending_card = None
+            self.call_after_refresh(self._relayout_columns)
 
     def _update_status(self, gpus: List[GPUInfo]):
         n_proc = sum(len(g.procs) for g in gpus)
@@ -197,6 +244,8 @@ class ScoposApp(App):
             f"  ·  press z to {other_layout} mode",
             style="dim",
         )
+        if self.danger:
+            text.append("  ·  ⚠ DANGER (right-click to kill)", style="bold red")
         self.query_one("#status", Static).update(text)
 
     def on_unmount(self):
