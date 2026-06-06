@@ -8,32 +8,23 @@ process numbering, exactly like the original CLI did.
 """
 
 from __future__ import annotations
+import pynvml as pn
+import psutil
 import re
 import time
 import random
 from dataclasses import (dataclass, field)
-from typing import (Dict, List, Optional)
-
-try:  # pynvml is only available on machines with an NVIDIA driver.
-    import pynvml as pn
-except Exception:  # pragma: no cover - exercised only without a driver.
-    pn = None
-
-try:
-    import psutil
-except Exception:  # pragma: no cover
-    psutil = None
-
+from typing import (Dict, List, Tuple, Optional)
 
 # A palette of visually distinct colours assigned to users in order of
 # first appearance. Names are Rich/Textual colour names so they render the
 # same in tables, bars and legends.
 USER_PALETTE: List[str] = [
-    # "bright_red",
     "bright_green",
     "bright_yellow",
-    "bright_blue",
+    # "bright_blue",
     "bright_magenta",
+    "bright_red",
     "bright_cyan",
     "orange1",
     "spring_green2",
@@ -51,17 +42,19 @@ class ProcInfo:
     """A single compute process running on a GPU."""
 
     pid: int
-    name: str
+    pname: str
     user: str
     mem: int  # bytes of GPU memory used
-    started: str  # parent-process creation time, formatted
     runtime: str  # how long this process has been running, formatted
-    number: str  # per-user "parentNo-childNo" label, filled by Monitor
-    detail: str  # script/task detail (only filled for the watched user)
-    cmd: str = ""  # full command line, including arguments
-    ppid: int = 0  # parent pid, used for per-user numbering
-    started_ts: float = 0.0  # raw parent start time, for sorting
-    runtime_sec: int = 0  # raw runtime in seconds, for sorting
+    cmd: str  # full command line, including arguments
+    runtime_sec: int  # raw runtime in seconds, for sorting
+
+    sid: int  # session id, i.e. the top-level parent process pid
+    sname: str  # session name, i.e. the top-level parent process name
+    s_start: str  # session start time, formatted
+    s_start_ts: float  # raw session start time, for sorting
+
+    number: str = ""  # per-user "parentNo-childNo" label, filled by Monitor
 
 
 @dataclass
@@ -124,7 +117,7 @@ class Monitor:
         self._initialised = False
         if self.watch_user:
             # Make sure the watched user always gets `bright_red`.
-            self._user_colors.setdefault(self.watch_user, "bright_red")
+            self._user_colors.setdefault(self.watch_user, "bright_blue")
 
     # -- colours -----------------------------------------------------------
     def color_for(self, user: str) -> str:
@@ -136,12 +129,12 @@ class Monitor:
 
     # -- lifecycle ---------------------------------------------------------
     def start(self):
-        if not self.demo and not self._initialised and pn is not None:
+        if not self.demo and not self._initialised:
             pn.nvmlInit()
             self._initialised = True
 
     def stop(self):
-        if not self.demo and self._initialised and pn is not None:
+        if not self.demo and self._initialised:
             try:
                 pn.nvmlShutdown()
             except Exception:
@@ -150,22 +143,11 @@ class Monitor:
 
     # -- system memory -----------------------------------------------------
     def system_stats(self) -> Dict[str, tuple]:
-        """Return host RAM/swap usage as {"mem": (used, total), "swap": (...)}.
+        """Return host RAM/swap usage as {"mem": (used, total), "swap": (...)}."""
+        vm = psutil.virtual_memory()
+        sm = psutil.swap_memory()
 
-        Falls back to plausible synthetic values when psutil is unavailable
-        (e.g. demo mode on a machine without it installed).
-        """
-        if psutil is not None:
-            vm = psutil.virtual_memory()
-            sm = psutil.swap_memory()
-            return {"mem": (vm.used, vm.total), "swap": (sm.used, sm.total)}
-        rng = random.Random()
-        mem_total = 32 * 1024 ** 3
-        swap_total = 8 * 1024 ** 3
-        return {
-            "mem": (int(mem_total * rng.uniform(0.2, 0.8)), mem_total),
-            "swap": (int(swap_total * rng.uniform(0.0, 0.4)), swap_total),
-        }
+        return {"mem": (vm.used, vm.total), "swap": (sm.used, sm.total)}
 
     # -- collection --------------------------------------------------------
     def collect(self) -> List[GPUInfo]:
@@ -184,15 +166,14 @@ class Monitor:
             mem = pn.nvmlDeviceGetMemoryInfo(handle)
             used, free = int(mem.used), int(mem.free)
             total = used + free
-            util, temp = -1, -1
             try:
-                util = pn.nvmlDeviceGetUtilizationRates(handle).gpu
+                util = int(pn.nvmlDeviceGetUtilizationRates(handle).gpu)
             except Exception:
-                pass
+                util = -1
             try:
-                temp = pn.nvmlDeviceGetTemperature(handle, pn.NVML_TEMPERATURE_GPU)
+                temp = int(pn.nvmlDeviceGetTemperature(handle, pn.NVML_TEMPERATURE_GPU))
             except Exception:
-                pass
+                temp = -1
 
             gpu = GPUInfo(gpu_id, name, used, total, free, util, temp)
 
@@ -220,61 +201,65 @@ class Monitor:
         are numbered in the order they are first seen across all GPUs, and the
         child counter increments for every process sharing that parent.
         """
-        user_ppids: Dict[str, List[int]] = {}
-        child_count: Dict[tuple, int] = {}
+        user_sids: Dict[str, List[int]] = {}
+        child_count: Dict[Tuple[str, int], int] = {}
         for gpu in gpus:
             for proc in gpu.procs:
-                ppids = user_ppids.setdefault(proc.user, [])
-                if proc.ppid not in ppids:
-                    ppids.append(proc.ppid)
-                pp_no = ppids.index(proc.ppid) + 1
-                key = (proc.user, proc.ppid)
-                child_count[key] = child_count.get(key, 0) + 1
-                proc.number = f"{pp_no:02d}-{child_count[key]:02d}"
+                sids = user_sids.setdefault(proc.user, [])
+                if proc.sid not in sids:
+                    sids.append(proc.sid)
+                s_no = sids.index(proc.sid) + 1
+                if proc.sid == proc.pid:
+                    proc.number = f"{s_no:02d}"
+                else:
+                    key = (proc.user, proc.sid)
+                    child_count[key] = child_count.get(key, 0) + 1
+                    proc.number = f"{s_no:02d}-{child_count[key]:02d}"
 
     def _build_proc(self, process) -> Optional[ProcInfo]:
+        # pid
         try:
             pid = int(process.pid)
             p = psutil.Process(pid)
         except Exception:
             return None
-        started_ts = 0.0
-        try:
-            ppid = p.ppid()
-            pp = psutil.Process(ppid)
-            started_ts = pp.create_time()
-            started = time.strftime("%y-%m-%d %H:%M:%S", time.localtime(started_ts))
-        except Exception:
-            ppid = 0
-            pp = None
-            started = "?"
-
-        runtime_sec = int(time.time() - p.create_time())
-        runtime = fmt_duration(runtime_sec)
+        # name
+        name = p.name()
+        # user
         try:
             user = p.username()
         except Exception:
             user = "?"
         self.color_for(user)
-
+        # mem
+        mem = int(process.usedGpuMemory or 0)
+        # cmd
         try:
             cmd = " ".join(p.cmdline()).strip()
         except Exception:
-            cmd = ""
-        if not cmd:
-            cmd = p.name()
-
-        mem = int(process.usedGpuMemory or 0)
-
-        detail = "-"
-        if user == self.watch_user and pp is not None:
-            detail = self._script_detail(p, pp)
+            cmd = name
+        # runtime
+        runtime_sec = int(time.time() - p.create_time())
+        runtime = fmt_duration(runtime_sec)
+        # session
+        session = p
+        while p:
+            pp = p.parent()
+            if pp:
+                if pp.pid == 1:
+                    session = p
+                    break
+            else:
+                break
+            p = pp
+        sname = session.name()
+        sid = session.pid
+        # session_start_time
+        s_start_ts = session.create_time()
+        s_start = time.strftime("%y-%m-%d %H:%M:%S", time.localtime(s_start_ts))
 
         # number is assigned later, once every GPU has been collected.
-        return ProcInfo(
-            pid, p.name(), user, mem, started, runtime, "", detail,
-            cmd=cmd, ppid=ppid, started_ts=started_ts, runtime_sec=runtime_sec,
-        )
+        return ProcInfo(pid=pid, pname=name, user=user, mem=mem, runtime=runtime, cmd=cmd, runtime_sec=runtime_sec, sname=sname, sid=sid, s_start=s_start, s_start_ts=s_start_ts)
 
     def _script_detail(self, p, pp) -> str:
         """Best-effort reconstruction of which task in a shell script is running.

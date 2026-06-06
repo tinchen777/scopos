@@ -144,16 +144,15 @@ class GpuCard(Vertical):
     """
 
     # Header labels and, for each, how to sort the rows by that column.
-    # ``None`` means the column is not sortable. The trailing DETAIL column is
-    # only shown when a user is being watched (see ``_headers``).
+    # ``None`` means the column is not sortable.
     COLUMNS: List[Tuple[str, Optional[Callable]]] = [
         ("PID", lambda p: p.pid),
         ("USER", lambda p: p.user.lower()),
         ("NO.", lambda p: (p.user.lower(), p.number)),
         ("MEM/GB", lambda p: p.mem),
-        ("STARTED", lambda p: p.started_ts),
         ("RUNTIME", lambda p: p.runtime_sec),
-        ("DETAIL", lambda p: (p.detail or "").lower()),
+        ("SESSION", lambda p: p.sname.lower()),
+        ("S.START", lambda p: p.s_start_ts),
         ("COMMAND", lambda p: p.cmd.lower()),
     ]
     # Columns that read most naturally largest-first on the initial click:
@@ -171,12 +170,7 @@ class GpuCard(Vertical):
         self._gpu: Optional[GPUInfo] = None
         self._sort_index: Optional[int] = None
         self._sort_reverse: bool = False
-        # detail
-        self.show_detail = show_detail
-        if not show_detail:
-            self._header = self.COLUMNS[:-2] + self.COLUMNS[-1:]
-        else:
-            self._header = self.COLUMNS
+        self._header = self.COLUMNS
 
     def compose(self):
         yield self.stats
@@ -224,12 +218,6 @@ class GpuCard(Vertical):
 
     def _update_stats(self, gpu: GPUInfo):
         rate = gpu.idle_rate
-        # if rate <= 0.15:
-        #     free_style = "bold white on red"
-        # elif rate <= 0.5:
-        #     free_style = "bold black on yellow"
-        # else:
-        #     free_style = "bold black on green"
         if rate <= 0.15:
             free_style = "bold red"
         elif rate <= 0.5:
@@ -306,12 +294,11 @@ class GpuCard(Vertical):
                 Text(f"● {proc.user}", style=color),
                 proc.number,
                 fmt_gb(proc.mem),
-                proc.started,
                 proc.runtime,
+                proc.sname,
+                proc.s_start,
                 proc.cmd,
             ]
-            if self.show_detail:
-                row.insert(-1, proc.detail)
             self.table.add_row(*row)
         if not procs:
             empty = ["" for _ in headers]
