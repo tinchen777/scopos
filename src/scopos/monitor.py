@@ -13,6 +13,7 @@ import psutil
 import time
 import random
 import subprocess
+import contextlib
 from dataclasses import (dataclass, field)
 from typing import (Any, Dict, List, Tuple, Optional)
 
@@ -55,6 +56,8 @@ class ProcInfo:
     sname: str  # session name, i.e. the top-level parent process name
     s_start: str  # session start time, formatted
     s_start_ts: float  # raw session start time, for sorting
+
+    rss: int = 0  # host (CPU) memory used, in bytes
 
     number: str = ""  # per-user "parentNo-childNo" label, filled by Monitor
 
@@ -111,17 +114,14 @@ class _HostProc:
     """Minimal stand-in for an NVML process record, for non-GPU processes.
 
     It exposes the same ``pid`` / ``usedGpuMemory`` attributes that
-    :meth:`Monitor._build_proc` reads, but reports the process's host RSS as
-    its "memory" so the PENDING card's MEM column shows something useful while
-    a job is still loading, before it touches the GPU.
+    :meth:`Monitor._build_proc` reads.  These processes hold no GPU memory, so
+    ``usedGpuMemory`` is 0; their host RAM is filled in from psutil like any
+    other process.
     """
 
     def __init__(self, pid: int):
         self.pid = pid
-        try:
-            self.usedGpuMemory = int(psutil.Process(pid).memory_info().rss)
-        except Exception:
-            self.usedGpuMemory = 0
+        self.usedGpuMemory = 0
 
 
 class Monitor:
@@ -133,9 +133,10 @@ class Monitor:
         self._user_colors: Dict[str, str] = {}
         self._next_color = 0
         self._initialised = False
-        # (pid, field) -> (t0, value0): when a progress bar was first seen and
-        # at what value, so we can estimate a time-to-completion across refreshes.
-        self._prog_hist: Dict[Tuple[int, str], Tuple[float, float]] = {}
+        # (pid, field) -> (t0, value0, last_seen): when a progress bar was first
+        # seen and at what value (plus when last updated), so we can estimate a
+        # time-to-completion across refreshes and prune stale entries by age.
+        self._prog_hist: Dict[Tuple[int, str], Tuple[float, float, float]] = {}
         # pane_pid -> tmux session name, rebuilt each ``collect`` cycle.
         self._tmux_panes: Dict[int, str] = {}
         if self.watch_user:
@@ -222,9 +223,13 @@ class Monitor:
         the remaining time from the rate of progress since then.  The estimate
         is written back into the progress dict as ``"eta"`` (seconds) for the
         renderer to show; it resets if the bar ever moves backwards (a restart).
+
+        History is keyed by ``(pid, field)`` and entries record when they were
+        last touched.  Pruning is *time-based* (not "anything not in this call"),
+        because GPU and CPU processes are annotated in separate passes and must
+        not wipe each other's clock.
         """
         now = time.time()
-        live = set()
         for proc in procs:
             for key, value in proc.meta.items():
                 if not is_progress(value):
@@ -233,22 +238,22 @@ class Monitor:
                 if frac is None:  # indeterminate bars have no ETA
                     continue
                 hkey = (proc.pid, key)
-                live.add(hkey)
                 prev = self._prog_hist.get(hkey)
                 if prev is None or frac < prev[1] - 1e-9:
                     # First sighting, or progress went backwards: (re)start the clock.
-                    self._prog_hist[hkey] = (now, frac)
+                    self._prog_hist[hkey] = (now, frac, now)
                     continue
+                t0, v0, _ = prev
+                self._prog_hist[hkey] = (t0, v0, now)  # keep it alive
                 if frac >= 1.0:
                     value["eta"] = 0.0
                     continue
-                t0, v0 = prev
                 dv, dt = frac - v0, now - t0
                 if dv > 0 and dt > 0:
                     value["eta"] = (1.0 - frac) / (dv / dt)
-        # Forget bars whose process (or field) is gone, so the map can't grow
-        # without bound on a long-running monitor.
-        for hkey in [k for k in self._prog_hist if k not in live]:
+        # Drop bars not seen for a while so the map can't grow without bound.
+        cutoff = now - 300
+        for hkey in [k for k, v in self._prog_hist.items() if v[2] < cutoff]:
             del self._prog_hist[hkey]
 
     # -- pending (not-yet-on-GPU) processes --------------------------------
@@ -309,23 +314,32 @@ class Monitor:
             p = psutil.Process(pid)
         except Exception:
             return None
-        # name
-        name = p.name()
-        # user
+        # Batch the per-process reads below into a single pass where the OS
+        # supports it; cheaper than fetching each attribute on its own.
         try:
-            user = p.username()
+            ctx = p.oneshot()
         except Exception:
-            user = "?"
+            ctx = contextlib.nullcontext()
+        with ctx:
+            name = p.name()
+            try:
+                user = p.username()
+            except Exception:
+                user = "?"
+            try:
+                cmd = " ".join(p.cmdline()).strip()
+            except Exception:
+                cmd = name
+            try:
+                runtime_sec = int(time.time() - p.create_time())
+            except Exception:
+                runtime_sec = 0
+            try:
+                rss = int(p.memory_info().rss)  # host (CPU) memory
+            except Exception:
+                rss = 0
         self.color_for(user)
-        # mem
-        mem = int(process.usedGpuMemory or 0)
-        # cmd
-        try:
-            cmd = " ".join(p.cmdline()).strip()
-        except Exception:
-            cmd = name
-        # runtime
-        runtime_sec = int(time.time() - p.create_time())
+        mem = int(process.usedGpuMemory or 0)  # GPU memory (0 for non-GPU procs)
         runtime = fmt_duration(runtime_sec)
         # session: walk up to the process whose parent is PID 1, recording the
         # ancestor chain on the way (needed to map tmux panes to sessions).
@@ -367,7 +381,7 @@ class Monitor:
         meta = read_fields(pid)
 
         # number is assigned later, once every GPU has been collected.
-        return ProcInfo(pid=pid, pname=name, user=user, mem=mem, runtime=runtime, cmd=cmd, runtime_sec=runtime_sec, sname=sname, sid=sid, s_start=s_start, s_start_ts=s_start_ts, meta=meta)
+        return ProcInfo(pid=pid, pname=name, user=user, mem=mem, runtime=runtime, cmd=cmd, runtime_sec=runtime_sec, sname=sname, sid=sid, s_start=s_start, s_start_ts=s_start_ts, rss=rss, meta=meta)
 
     # -- tmux --------------------------------------------------------------
     def _tmux_pane_map(self) -> Dict[int, str]:
@@ -411,10 +425,25 @@ class Monitor:
 
 
 class DemoMonitor(Monitor):
-    """Demo monitor for testing purposes."""
+    """Synthetic monitor with a *stable, evolving* set of processes.
+
+    Unlike a fresh-random-every-tick fake, the jobs here keep their PIDs and
+    advance their progress over wall-clock time, so ``--demo`` exercises the
+    real features: live progress bars with an ETA, host-RAM columns, and the
+    resident CPU card (jobs that report to scopos but never touch a GPU).
+    """
+
+    GPU_NAMES = [
+        "NVIDIA GeForce RTX 4090",
+        "NVIDIA A100-SXM4-80GB",
+        "NVIDIA H100 80GB HBM3",
+        "NVIDIA A100-SXM4-80GB",
+    ]
+    GPU_TOTAL_GB = [24, 80, 80, 80]
 
     def __init__(self, watch_user: str = ""):
         super().__init__(watch_user=watch_user)
+        self._jobs: Optional[List[Dict[str, Any]]] = None
 
     # -- lifecycle ---------------------------------------------------------
     def start(self):
@@ -423,134 +452,125 @@ class DemoMonitor(Monitor):
     def stop(self):
         pass
 
-    def _demo_meta(self, rng: random.Random, script: str) -> Dict[str, Any]:
-        """Fabricate the kind of fields a script would report via the API.
+    # -- synthetic jobs ----------------------------------------------------
+    def _ensure_jobs(self):
+        """Build the fixed roster of demo jobs once (seeded, so it's stable)."""
+        if self._jobs is not None:
+            return
+        rng = random.Random(42)
+        watch = self.watch_user or "frank"
+        users = ["alice", "bob", "carol", watch]
+        scripts = ["train.py", "finetune.py", "eval.py", "main.py"]
+        now = time.time()
+        pid = 10001
+        jobs: List[Dict[str, Any]] = []
 
-        Mirrors what :mod:`scopos.api` would write, so zen mode (``z``) has
-        something to show - including animated progress bars - in ``--demo``.
-        """
-        # A few processes report nothing, like real-world jobs that don't use
-        # the API; this keeps the demo honest about missing metadata.
-        if rng.random() < 0.25:
+        def make(user: str, gpu: Optional[int], kind: Optional[str] = None) -> Dict[str, Any]:
+            nonlocal pid
+            kind = kind or rng.choice(["determinate", "determinate", "warmup", "none"])
+            script = rng.choice(scripts)
+            total = rng.choice([50, 100, 200])
+            job = {
+                "pid": pid,
+                "user": user,
+                "gpu": gpu,
+                "pname": rng.choice(["python", "python3", "pt_main"]),
+                "mem": (rng.randint(2, 10) * 1024 ** 3) if gpu is not None else 0,
+                "rss": rng.randint(1, 24) * 1024 ** 3,
+                "sid": rng.randint(1000, 9999),
+                "sname": rng.choice(["bash", "zsh", "sbatch", "tmux:main", "tmux:exp1", "tmux:train"]),
+                "start": now - rng.randint(30, 6000),
+                "kind": kind,
+                "script": script,
+                "total": total,
+                "duration": rng.uniform(60, 240),  # seconds for one full run
+                "loss0": rng.uniform(1.5, 3.0),
+            }
+            job["cmd"] = (
+                f"python {script} --lr {rng.choice(['1e-3', '5e-4', '3e-5'])}"
+                f" --batch-size {rng.choice([16, 32, 64])} --epochs {total} --fp16"
+            )
+            pid += 1
+            return job
+
+        for gpu_id in range(4):
+            for _ in range(rng.randint(1, 3)):
+                jobs.append(make(rng.choice(users), gpu_id))
+        # Make sure the watched user has a couple of GPU jobs to focus on.
+        jobs.append(make(watch, 0))
+        jobs.append(make(watch, 2))
+        # CPU-only jobs for the watched user (these populate the CPU card). They
+        # always report something, since only API users appear there.
+        for _ in range(2):
+            jobs.append(make(watch, None, kind=rng.choice(["determinate", "warmup"])))
+        self._jobs = jobs
+
+    def _job_meta(self, job: Dict[str, Any]) -> Dict[str, Any]:
+        kind = job["kind"]
+        if kind == "none":
             return {}
-        stage = rng.choice(["warmup", "train", "train", "eval"])
-        if stage == "warmup":
-            # Indeterminate bar -> animated marquee in the TUI.
-            return {"stage": stage, "progress": make_progress(label="loading data")}
-        total = rng.choice([50, 100, 200])
-        done = rng.randint(0, total)
-        meta: Dict[str, Any] = {
-            "stage": stage,
-            "task": script.replace(".py", ""),
-            "epoch": make_progress(done, total),
-            "loss": f"{rng.uniform(0.05, 2.5):.4f}",
+        elapsed = time.time() - job["start"]
+        phase = elapsed % job["duration"]  # loops, so a run "restarts" periodically
+        if kind == "warmup" and phase < 15:
+            # First seconds of each loop: an indeterminate "loading" marquee.
+            return {"stage": "warmup", "epoch": make_progress(label="loading data")}
+        frac = phase / job["duration"]
+        done = int(frac * job["total"])
+        return {
+            "stage": "train",
+            "task": job["script"].replace(".py", ""),
+            "epoch": make_progress(done, job["total"]),
+            "loss": f"{job['loss0'] * (1 - 0.8 * frac):.4f}",
         }
-        if stage == "eval":
-            meta["acc"] = f"{rng.uniform(60, 99):.1f}%"
-        return meta
+
+    def _job_proc(self, job: Dict[str, Any]) -> ProcInfo:
+        self.color_for(job["user"])
+        runtime_sec = int(time.time() - job["start"])
+        return ProcInfo(
+            pid=job["pid"], pname=job["pname"], user=job["user"],
+            mem=job["mem"], runtime=fmt_duration(runtime_sec), cmd=job["cmd"],
+            runtime_sec=runtime_sec, sid=job["sid"], sname=job["sname"],
+            s_start=time.strftime("%y-%m-%d %H:%M:%S", time.localtime(job["start"])),
+            s_start_ts=job["start"], rss=job["rss"], meta=self._job_meta(job),
+        )
 
     # -- demo collection ---------------------------------------------------
     def collect(self) -> List[GPUInfo]:
-        rng = random.Random()  # fresh randomness each tick for a "live" feel
-        names = [
-            "NVIDIA GeForce RTX 4090",
-            "NVIDIA A100-SXM4-80GB",
-            "NVIDIA H100 80GB HBM3",
-        ]
-        users_pool = ["alice", "bob", "carol", "dave", "erin", self.watch_user or "frank"]
-        # Give each user a small pool of "parent" pids so the same parent can
-        # show up on several GPUs - that is what makes the per-user numbering
-        # (parentNo-childNo) interesting to look at.
-        parent_pids = {u: [rng.randint(1000, 9999) for _ in range(2)] for u in users_pool}
+        self._ensure_jobs()
+        rng = random.Random()  # only util/temperature jitter is random per tick
         gpus: List[GPUInfo] = []
-        n_gpu = 4
-        for gpu_id in range(n_gpu):
-            total = rng.choice([24, 40, 80]) * 1024 ** 3
-            gpu = GPUInfo(
-                gpu_id,
-                names[gpu_id % len(names)],
-                0,
-                total,
-                total,
-                rng.randint(0, 100),
-                rng.randint(35, 85),
-            )
-            used = 0
-            n_proc = rng.randint(0, 5)
-            for _ in range(n_proc):
-                user = rng.choice(users_pool)
-                self.color_for(user)
-                mem = rng.randint(1, 12) * 1024 ** 3
-                if used + mem > total:
-                    break
-                used += mem
-                runtime_sec = rng.randint(0, 400000)
-                s_start_ts = time.time() - runtime_sec
-                s_start = time.strftime("%y-%m-%d %H:%M:%S", time.localtime(s_start_ts))
-                script = rng.choice(["train.py", "finetune.py", "eval.py", "main.py"])
-                cmd = (
-                    f"python {script} --lr {rng.choice(['1e-3', '5e-4', '3e-5'])}"
-                    f" --batch-size {rng.choice([16, 32, 64])}"
-                    f" --epochs {rng.randint(10, 200)} --fp16"
-                )
-                sid = rng.choice(parent_pids[user])
-                gpu.procs.append(
-                    ProcInfo(
-                        pid=rng.randint(10000, 99999),
-                        pname=rng.choice(["python", "python3", "train", "pt_main"]),
-                        user=user,
-                        mem=mem,
-                        runtime=fmt_duration(runtime_sec),
-                        cmd=cmd,
-                        runtime_sec=runtime_sec,
-                        sid=sid,
-                        sname=rng.choice(["bash", "zsh", "sbatch", "tmux:main", "tmux:exp1", "tmux:train"]),
-                        s_start=s_start,
-                        s_start_ts=s_start_ts,
-                        number="",
-                        meta=self._demo_meta(rng, script),
-                    )
-                )
-                gpu.user_mems[user] = gpu.user_mems.get(user, 0) + mem
+        for gpu_id in range(4):
+            total = self.GPU_TOTAL_GB[gpu_id] * 1024 ** 3
+            gpus.append(GPUInfo(
+                gpu_id, self.GPU_NAMES[gpu_id], 0, total, total,
+                rng.randint(0, 100), rng.randint(35, 85),
+            ))
+        for job in self._jobs:
+            if job["gpu"] is None:
+                continue
+            gpu = gpus[job["gpu"]]
+            proc = self._job_proc(job)
+            gpu.procs.append(proc)
+            gpu.user_mems[proc.user] = gpu.user_mems.get(proc.user, 0) + proc.mem
+        for gpu in gpus:
+            used = min(sum(p.mem for p in gpu.procs), gpu.mem_total)
             gpu.mem_used = used
-            gpu.mem_free = total - used
-            gpus.append(gpu)
+            gpu.mem_free = gpu.mem_total - used
         self._assign_numbers(gpus)
         self._annotate_eta([p for g in gpus for p in g.procs])
         return gpus
 
     def collect_pending(self, gpu_pids: set) -> List[ProcInfo]:
-        """Fabricate a couple of "still loading" processes for the watched user.
-
-        Lets ``--demo --zen`` show the PENDING card (jobs that have reported to
-        Scopos but haven't allocated GPU memory yet).
-        """
-        rng = random.Random()
+        """The watched user's CPU-only (never-on-GPU) reporting jobs."""
+        self._ensure_jobs()
         user = self.watch_user or "frank"
-        self.color_for(user)
-        pending: List[ProcInfo] = []
-        for _ in range(rng.randint(0, 2)):
-            runtime_sec = rng.randint(1, 120)
-            s_start_ts = time.time() - runtime_sec
-            pending.append(
-                ProcInfo(
-                    pid=rng.randint(10000, 99999),
-                    pname="python",
-                    user=user,
-                    mem=rng.randint(1, 8) * 1024 ** 3,  # stands in for host RSS
-                    runtime=fmt_duration(runtime_sec),
-                    cmd="python train.py --epochs 100 --fp16",
-                    runtime_sec=runtime_sec,
-                    sid=rng.randint(1000, 9999),
-                    sname=rng.choice(["bash", "tmux:train"]),
-                    s_start=time.strftime("%y-%m-%d %H:%M:%S", time.localtime(s_start_ts)),
-                    s_start_ts=s_start_ts,
-                    number="",
-                    meta={"stage": "warmup", "epoch": make_progress(label="loading data")},
-                )
-            )
-        synthetic = GPUInfo(-1, "", 0, 0, 0, -1, -1, procs=pending)
+        pending = [
+            self._job_proc(job) for job in self._jobs
+            if job["gpu"] is None and job["user"] == user
+        ]
+        synthetic = GPUInfo(-1, "CPU", 0, 0, 0, -1, -1, procs=pending)
         self._assign_numbers([synthetic])
+        self._annotate_eta(pending)
         return pending
 
 

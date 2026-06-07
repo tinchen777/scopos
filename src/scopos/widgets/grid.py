@@ -121,10 +121,13 @@ class _Column:
     ``render`` is called as ``render(card, proc)`` and returns a cell value
     (a ``str`` or Rich ``Text``).  ``meta_key`` is set for columns that come
     from a process's reported metadata, so the card can find animated
-    progress cells.
+    progress cells.  ``width`` caps how many cells the column takes; the full
+    value is still stored, so hovering a clipped cell shows it in a tooltip.
+    A ``width`` of ``None`` lets the column auto-size to its content (used for
+    user-reported metadata columns, which we always show in full).
     """
 
-    __slots__ = ("key", "label", "sort", "render", "meta_key")
+    __slots__ = ("key", "label", "sort", "render", "meta_key", "width")
 
     def __init__(
         self,
@@ -133,12 +136,14 @@ class _Column:
         sort: Optional[Callable],
         render: Callable[["GpuCard", ProcInfo], Any],
         meta_key: Optional[str] = None,
+        width: Optional[int] = None,
     ):
         self.key = key
         self.label = label
         self.sort = sort
         self.render = render
         self.meta_key = meta_key
+        self.width = width
 
 
 def _user_cell(card: "GpuCard", p: ProcInfo) -> Text:
@@ -149,30 +154,32 @@ def fmt_gb(num_bytes: float) -> str:
     return "%.2f" % (num_bytes / (1024 ** 3))
 
 
+# All known columns, keyed for reuse across the normal / zen / CPU layouts.
+# MEM/GB is GPU memory; RAM/GB is host (CPU) memory, shown everywhere.
+ALL_COLUMNS: List[_Column] = [
+    _Column("PID", "PID", lambda p: p.pid, lambda c, p: str(p.pid), width=7),
+    _Column("USER", "USER", lambda p: p.user.lower(), _user_cell, width=12),
+    _Column("NO.", "NO.", lambda p: (p.user.lower(), p.number), lambda c, p: p.number, width=7),
+    _Column("MEM/GB", "MEM/GB", lambda p: p.mem, lambda c, p: fmt_gb(p.mem), width=8),
+    _Column("RAM/GB", "RAM/GB", lambda p: p.rss, lambda c, p: fmt_gb(p.rss), width=8),
+    _Column("RUNTIME", "RUNTIME", lambda p: p.runtime_sec, lambda c, p: p.runtime, width=9),
+    _Column("SESSION", "SESSION", lambda p: p.sname.lower(), lambda c, p: p.sname, width=16),
+    _Column("S.START", "S.START", lambda p: p.s_start_ts, lambda c, p: p.s_start, width=18),
+    _Column("COMMAND", "COMMAND", lambda p: p.cmd.lower(), lambda c, p: p.cmd, width=40),
+]
+COLS: Dict[str, _Column] = {c.key: c for c in ALL_COLUMNS}
+
 # The classic, show-everything layout.
 NORMAL_COLUMNS: List[_Column] = [
-    _Column("PID", "PID", lambda p: p.pid, lambda c, p: str(p.pid)),
-    _Column("USER", "USER", lambda p: p.user.lower(), _user_cell),
-    _Column("NO.", "NO.", lambda p: (p.user.lower(), p.number), lambda c, p: p.number),
-    _Column("MEM/GB", "MEM/GB", lambda p: p.mem, lambda c, p: fmt_gb(p.mem)),
-    _Column("RUNTIME", "RUNTIME", lambda p: p.runtime_sec, lambda c, p: p.runtime),
-    _Column("SESSION", "SESSION", lambda p: p.sname.lower(), lambda c, p: p.sname),
-    _Column("S.START", "S.START", lambda p: p.s_start_ts, lambda c, p: p.s_start),
-    _Column("COMMAND", "COMMAND", lambda p: p.cmd.lower(), lambda c, p: p.cmd),
+    COLS[k] for k in ("PID", "USER", "NO.", "MEM/GB", "RAM/GB", "RUNTIME", "SESSION", "S.START", "COMMAND")
 ]
-
-# Zen mode drops USER and S.START; metadata columns are inserted before COMMAND.
-ZEN_FIXED: List[_Column] = [
-    NORMAL_COLUMNS[0],  # PID
-    NORMAL_COLUMNS[2],  # NO.
-    NORMAL_COLUMNS[3],  # MEM/GB
-    NORMAL_COLUMNS[4],  # RUNTIME
-    NORMAL_COLUMNS[5],  # SESSION
-]
-ZEN_COMMAND = NORMAL_COLUMNS[7]
+# Zen mode drops USER and S.START; metadata columns go in before COMMAND.
+ZEN_FIXED_KEYS = ("PID", "NO.", "MEM/GB", "RAM/GB", "RUNTIME", "SESSION")
+# The CPU card is like zen but has no GPU memory column.
+CPU_FIXED_KEYS = ("PID", "NO.", "RAM/GB", "RUNTIME", "SESSION")
 
 # Columns that read most naturally largest-first on the initial click.
-DESC_FIRST_KEYS = {"PID", "MEM/GB", "RUNTIME", "S.START"}
+DESC_FIRST_KEYS = {"PID", "MEM/GB", "RAM/GB", "RUNTIME", "S.START"}
 
 
 def _progress_text(data: Dict[str, Any]) -> str:
@@ -317,7 +324,7 @@ class GpuCard(Vertical):
         self._deferred = None
         self._gpu = gpu
         if self.is_pending:
-            self.border_title = " ⏳ PENDING  ·  not yet on GPU "
+            self.border_title = " 🧮 CPU  ·  tracked processes (scopos API) "
             self._update_pending_stats(gpu)
         else:
             self.border_title = f" # {gpu.index}  {gpu.name} "
@@ -327,10 +334,12 @@ class GpuCard(Vertical):
         self._update_table(gpu)
 
     def _update_pending_stats(self, gpu: GPUInfo):
+        rss_total = sum(p.rss for p in gpu.procs)
         line = Text(no_wrap=True, overflow="ellipsis")
-        line.append("[PENDING] ", style="bold yellow")
+        line.append("[CPU] ", style="bold cyan")
         line.append(f"{len(gpu.procs)} proc(s)", style="bold")
-        line.append("  ·  reported to scopos, waiting to allocate GPU memory", style="dim")
+        line.append(f"    [RAM] {fmt_gb(rss_total)} GB", style="bold")
+        line.append("  ·  host-memory view of this user's scopos-reporting jobs", style="dim")
         self.stats.update(line)
 
     def _update_stats(self, gpu: GPUInfo):
@@ -403,9 +412,12 @@ class GpuCard(Vertical):
         return list(gpu.procs)
 
     def _columns_for(self, procs: List[ProcInfo]) -> List[_Column]:
-        # Pending cards are metadata-centric, so they always use the zen columns.
+        # CPU cards are metadata-centric, so they always use the zen-style layout.
         if not self.zen and not self.is_pending:
             return NORMAL_COLUMNS
+        # The CPU card has no GPU memory column; zen GPU cards do.
+        fixed_keys = CPU_FIXED_KEYS if self.is_pending else ZEN_FIXED_KEYS
+        fixed = [COLS[k] for k in fixed_keys]
         # Build one column per reported field, in first-seen order across the
         # visible processes, then keep COMMAND last.
         meta_keys: List[str] = []
@@ -413,7 +425,7 @@ class GpuCard(Vertical):
             for key in proc.meta:
                 if key not in meta_keys:
                     meta_keys.append(key)
-        return ZEN_FIXED + [self._meta_column(key) for key in meta_keys] + [ZEN_COMMAND]
+        return fixed + [self._meta_column(key) for key in meta_keys] + [COLS["COMMAND"]]
 
     def _meta_column(self, key: str) -> _Column:
         def render(card: "GpuCard", proc: ProcInfo, _key: str = key) -> Any:
@@ -453,7 +465,11 @@ class GpuCard(Vertical):
                     if col.sort is not None:
                         sort_func = col.sort
                 labels.append(label)
-            self.table.add_columns(*labels)
+            # Built-in columns get a width cap (content is clipped in the cell
+            # but kept whole for the hover tooltip); metadata columns auto-size
+            # so user-reported fields and progress bars always show in full.
+            for col, label in zip(columns, labels):
+                self.table.add_column(label, width=col.width)
             # sort process
             if sort_func is not None:
                 procs = sorted(procs, key=sort_func, reverse=self._sort_reverse)
@@ -471,9 +487,12 @@ class GpuCard(Vertical):
         else:
             self._row_procs = []
             self.table.add_columns("")  # at least one column is needed to show the "no processes" message
-            msg = "— no compute processes —"
-            if self.zen and self.monitor.watch_user:
+            if self.is_pending:
+                msg = "— no scopos-reporting processes —"
+            elif self.zen and self.monitor.watch_user:
                 msg = f"— no processes for [{self.monitor.watch_user}] —"
+            else:
+                msg = "— no compute processes —"
             self.table.add_row(Text(msg, style="dim"))
 
     # -- interaction: hover, right-click menu, kill ------------------------
@@ -546,10 +565,11 @@ class GpuCard(Vertical):
             self._notify(f"Copy failed: {exc}", error=True)
 
     def _confirm_kill(self, proc: ProcInfo):
+        # Show the full row (same fields as "copy info") so it's easy to be sure
+        # this is the right process before sending a signal.
         msg = (
-            f"⚠ Kill process PID {proc.pid} ({proc.user})?\n\n"
-            f"{proc.cmd}\n\n"
-            "This sends a terminate signal to the process and cannot be undone."
+            "⚠ Kill this process? This sends a terminate signal and cannot be undone.\n\n"
+            f"{self._row_info(proc)}"
         )
         self.app.push_screen(
             ConfirmScreen(msg),
