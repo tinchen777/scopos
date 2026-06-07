@@ -17,27 +17,13 @@ import contextlib
 from dataclasses import (dataclass, field)
 from typing import (Any, Dict, List, Tuple, Optional)
 
+from . import config
 from .metadata.utils import (make_progress, read_fields, is_progress, iter_pids)
 
-# A palette of visually distinct colours assigned to users in order of
-# first appearance. Names are Rich/Textual colour names so they render the
-# same in tables, bars and legends.
-USER_PALETTE: List[str] = [
-    "bright_green",
-    "bright_yellow",
-    # "bright_blue",
-    "bright_magenta",
-    "bright_red",
-    "bright_cyan",
-    "orange1",
-    "spring_green2",
-    "deep_pink2",
-    "gold1",
-    "dodger_blue1",
-    "medium_purple1",
-    "chartreuse2",
-    "hot_pink",
-]
+# A palette of visually distinct colours assigned to users in order of first
+# appearance, so a given user keeps the same colour in tables, bars and legends.
+# Sourced from scopos.config so it can be themed/overridden in one place.
+USER_PALETTE: List[str] = config.USER_PALETTE
 
 
 @dataclass
@@ -141,7 +127,7 @@ class Monitor:
         self._tmux_panes: Dict[int, str] = {}
         if self.watch_user:
             # Make sure the watched user always gets `bright_red`.
-            self._user_colors.setdefault(self.watch_user, "bright_blue")
+            self._user_colors.setdefault(self.watch_user, config.WATCH_USER_COLOR)
 
     # -- colours -----------------------------------------------------------
     def color_for(self, user: str) -> str:

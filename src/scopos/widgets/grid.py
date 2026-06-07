@@ -58,7 +58,7 @@ class MemoryBar(Widget):
             text.append("█" * cells, style=color)
             used += cells
         if used < width:
-            text.append("░" * (width - used), style="grey35")
+            text.append("░" * (width - used), style=config.BAR_TRACK_COLOR)
         return text
 
 
@@ -83,7 +83,8 @@ def render_progress(data: Dict[str, Any], frame: int = 0, width: int = PROGRESS_
     """
     value = data.get("value")
     label = data.get("label")
-    color = data.get("color") or "cyan"
+    color = data.get("color") or config.PROGRESS_COLOR
+    track = config.BAR_TRACK_COLOR
     bar = Text(no_wrap=True, overflow="crop")
     bar.append("▕", style="grey50")
     if value is None:
@@ -95,16 +96,16 @@ def render_progress(data: Dict[str, Any], frame: int = 0, width: int = PROGRESS_
             cycle = span * 2
             p = frame % cycle
             pos = p if p <= span else cycle - p
-            bar.append("░" * pos, style="grey35")
+            bar.append("░" * pos, style=track)
             bar.append("█" * block, style=color)
-            bar.append("░" * (span - pos), style="grey35")
+            bar.append("░" * (span - pos), style=track)
         bar.append("▏", style="grey50")
         bar.append(f" {label}" if label else " …", style="dim")
     else:
         frac = _clamp01(value)
         filled = max(0, min(width, int(round(frac * width))))
         bar.append("█" * filled, style=color)
-        bar.append("░" * (width - filled), style="grey35")
+        bar.append("░" * (width - filled), style=track)
         bar.append("▏", style="grey50")
         shown = label if label is not None else f"{frac * 100:.0f}%"
         bar.append(f" {shown}", style="dim")
@@ -112,7 +113,7 @@ def render_progress(data: Dict[str, Any], frame: int = 0, width: int = PROGRESS_
         eta = data.get("eta")
         if eta is not None:
             tail = "done" if eta <= 0 else f"~{fmt_duration(eta)}"
-            bar.append(f" · {tail}", style="green" if eta <= 0 else "cyan")
+            bar.append(f" · {tail}", style=config.COLOR_OK if eta <= 0 else config.PROGRESS_COLOR)
     return bar
 
 
@@ -175,9 +176,16 @@ ALL_COLUMNS: List[_Column] = [
 ]
 COLS: Dict[str, _Column] = {c.key: c for c in ALL_COLUMNS}
 
-# The classic, show-everything layout.
+
+def _visible(key: str) -> bool:
+    """Whether a built-in column is shown (config.COLUMN_VISIBLE, default True)."""
+    return config.COLUMN_VISIBLE.get(key, True)
+
+
+# The classic, show-everything layout (minus any columns hidden in config).
 NORMAL_COLUMNS: List[_Column] = [
     COLS[k] for k in ("PID", "USER", "NO.", "MEM/GB", "RAM/GB", "RUNTIME", "SESSION", "S.START", "COMMAND")
+    if _visible(k)
 ]
 # Zen mode drops USER and S.START; metadata columns go in before COMMAND.
 ZEN_FIXED_KEYS = ("PID", "NO.", "MEM/GB", "RAM/GB", "RUNTIME", "SESSION")
@@ -372,12 +380,12 @@ class GpuCard(Vertical):
 
     def _update_stats(self, gpu: GPUInfo):
         rate = gpu.idle_rate
-        if rate <= 0.15:
-            free_style = "bold red"
-        elif rate <= 0.5:
-            free_style = "bold yellow"
+        if rate <= config.MEM_FREE_CRIT:
+            free_style = f"bold {config.COLOR_CRIT}"
+        elif rate <= config.MEM_FREE_WARN:
+            free_style = f"bold {config.COLOR_WARN}"
         else:
-            free_style = "bold green"
+            free_style = f"bold {config.COLOR_OK}"
 
         line = Text(no_wrap=True, overflow="ellipsis")
         # PROC
@@ -394,11 +402,11 @@ class GpuCard(Vertical):
         # ⚡
         if gpu.util >= 0:
             line.append("   [⚡] ", style="bold")
-            line.append(f"{gpu.util}%", style="cyan")
+            line.append(f"{gpu.util}%", style=config.TEMP_COLOR)
         # 🌡
         if gpu.temperature >= 0:
             line.append("   [🌡] ", style="bold")
-            temp_style = "red" if gpu.temperature >= 80 else "cyan"
+            temp_style = config.COLOR_CRIT if gpu.temperature >= config.TEMP_WARN_C else config.TEMP_COLOR
             line.append(f"{gpu.temperature}°C", style=temp_style)
         self.stats.update(line)
 
@@ -442,10 +450,10 @@ class GpuCard(Vertical):
     def _columns_for(self, procs: List[ProcInfo]) -> List[_Column]:
         # CPU cards are metadata-centric, so they always use the zen-style layout.
         if not self.zen and not self.is_pending:
-            return NORMAL_COLUMNS
+            return NORMAL_COLUMNS or [COLS["PID"]]
         # The CPU card has no GPU memory column; zen GPU cards do.
         fixed_keys = CPU_FIXED_KEYS if self.is_pending else ZEN_FIXED_KEYS
-        fixed = [COLS[k] for k in fixed_keys]
+        fixed = [COLS[k] for k in fixed_keys if _visible(k)]
         # Build one column per reported field, in first-seen order across the
         # visible processes, then keep COMMAND last.
         meta_keys: List[str] = []
@@ -453,7 +461,9 @@ class GpuCard(Vertical):
             for key in proc.meta:
                 if key not in meta_keys:
                     meta_keys.append(key)
-        return fixed + [self._meta_column(key) for key in meta_keys] + [COLS["COMMAND"]]
+        tail = [COLS["COMMAND"]] if _visible("COMMAND") else []
+        cols = fixed + [self._meta_column(key) for key in meta_keys] + tail
+        return cols or [COLS["PID"]]  # never leave the table column-less
 
     def _meta_column(self, key: str) -> _Column:
         def render(card: "GpuCard", proc: ProcInfo, _key: str = key) -> Any:

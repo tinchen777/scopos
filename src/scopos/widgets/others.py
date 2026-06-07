@@ -7,6 +7,7 @@ from rich.text import Text
 from textual.widgets import Static
 
 from .. import __version__
+from .. import config
 from ..monitor import Monitor
 
 
@@ -56,19 +57,19 @@ class SysMeter(Static):
     def _line(self, label: str, used: float, total: float) -> Text:
         total = total or 1
         frac = max(0.0, min(1.0, used / total))
-        if frac >= 0.85:
-            color = "red"
-        elif frac >= 0.6:
-            color = "yellow"
+        if frac >= config.SYS_MEM_CRIT:
+            color = config.COLOR_CRIT
+        elif frac >= config.SYS_MEM_WARN:
+            color = config.COLOR_WARN
         else:
-            color = "green"
+            color = config.COLOR_OK
         filled = round(frac * self.BAR_WIDTH)
         gb = 1024 ** 3
         line = Text()
         line.append(f"{label} ", style="bold")
         line.append("▕", style="grey50")
         line.append("█" * filled, style=color)
-        line.append("░" * (self.BAR_WIDTH - filled), style="grey35")
+        line.append("░" * (self.BAR_WIDTH - filled), style=config.BAR_TRACK_COLOR)
         line.append("▏", style="grey50")
         line.append(f" {used / gb:5.1f} / {total / gb:5.1f} GB", style="dim")
         line.append(f" {frac * 100:3.0f}%", style=color)
