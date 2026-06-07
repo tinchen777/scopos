@@ -14,6 +14,7 @@ from typing import (Any, Callable, Dict, List, Optional, Tuple)
 from ..metadata.utils import is_progress
 from ..monitor import (GPUInfo, Monitor, ProcInfo, fmt_duration)
 from .dialogs import (ConfirmScreen, ContextMenu)
+from .. import config
 
 
 class MemoryBar(Widget):
@@ -156,16 +157,21 @@ def fmt_gb(num_bytes: float) -> str:
 
 # All known columns, keyed for reuse across the normal / zen / CPU layouts.
 # MEM/GB is GPU memory; RAM/GB is host (CPU) memory, shown everywhere.
+# Widths come from ``config.COLUMN_WIDTHS`` so the layout can be tuned in one place.
+def _w(key: str) -> Optional[int]:
+    return config.COLUMN_WIDTHS.get(key)
+
+
 ALL_COLUMNS: List[_Column] = [
-    _Column("PID", "PID", lambda p: p.pid, lambda c, p: str(p.pid), width=7),
-    _Column("USER", "USER", lambda p: p.user.lower(), _user_cell, width=12),
-    _Column("NO.", "NO.", lambda p: (p.user.lower(), p.number), lambda c, p: p.number, width=7),
-    _Column("MEM/GB", "MEM/GB", lambda p: p.mem, lambda c, p: fmt_gb(p.mem), width=8),
-    _Column("RAM/GB", "RAM/GB", lambda p: p.rss, lambda c, p: fmt_gb(p.rss), width=8),
-    _Column("RUNTIME", "RUNTIME", lambda p: p.runtime_sec, lambda c, p: p.runtime, width=9),
-    _Column("SESSION", "SESSION", lambda p: p.sname.lower(), lambda c, p: p.sname, width=16),
-    _Column("S.START", "S.START", lambda p: p.s_start_ts, lambda c, p: p.s_start, width=18),
-    _Column("COMMAND", "COMMAND", lambda p: p.cmd.lower(), lambda c, p: p.cmd, width=40),
+    _Column("PID", "PID", lambda p: p.pid, lambda c, p: str(p.pid), width=_w("PID")),
+    _Column("USER", "USER", lambda p: p.user.lower(), _user_cell, width=_w("USER")),
+    _Column("NO.", "NO.", lambda p: (p.user.lower(), p.number), lambda c, p: p.number, width=_w("NO.")),
+    _Column("MEM/GB", "MEM/GB", lambda p: p.mem, lambda c, p: fmt_gb(p.mem), width=_w("MEM/GB")),
+    _Column("RAM/GB", "RAM/GB", lambda p: p.rss, lambda c, p: fmt_gb(p.rss), width=_w("RAM/GB")),
+    _Column("RUNTIME", "RUNTIME", lambda p: p.runtime_sec, lambda c, p: p.runtime, width=_w("RUNTIME")),
+    _Column("SESSION", "SESSION", lambda p: p.sname.lower(), lambda c, p: p.sname, width=_w("SESSION")),
+    _Column("S.START", "S.START", lambda p: p.s_start_ts, lambda c, p: p.s_start, width=_w("S.START")),
+    _Column("COMMAND", "COMMAND", lambda p: p.cmd.lower(), lambda c, p: p.cmd, width=_w("COMMAND")),
 ]
 COLS: Dict[str, _Column] = {c.key: c for c in ALL_COLUMNS}
 
@@ -195,6 +201,22 @@ def _progress_text(data: Dict[str, Any]) -> str:
     return shown
 
 
+def _fit_cell(value: Any, width: Optional[int]) -> Any:
+    """Clip a cell's text to ``width`` with an ellipsis (… ); ``None`` = no clip.
+
+    Only what's drawn in the cell is shortened — the hover tooltip recomputes
+    the full value from the process, so nothing is lost.
+    """
+    if width is None:
+        return value
+    text = value if isinstance(value, Text) else Text(str(value))
+    if len(text.plain) <= width:
+        return value
+    clipped = text.copy()
+    clipped.truncate(width, overflow="ellipsis")
+    return clipped
+
+
 def _meta_sort_value(value: Any):
     """A sort key for a metadata cell that never compares across types."""
     if is_progress(value):
@@ -211,22 +233,24 @@ def _meta_sort_value(value: Any):
 class GpuCard(Vertical):
     """One GPU: header, stats line, proportion bar, legend and process table."""
 
-    DEFAULT_CSS = """
-    GpuCard {
+    # Layout-driven bits (padding, max width/height) come from scopos.config.
+    DEFAULT_CSS = f"""
+    GpuCard {{
         height: auto;
+        max-width: {config.CARD_MAX_WIDTH or '100%'};
         border: round $primary;
         border-title-color: $text;
         border-title-style: bold;
-        padding: 0 1;
+        padding: {config.CARD_PADDING[0]} {config.CARD_PADDING[1]};
         margin: 0;
-    }
-    GpuCard .stats { height: 1; }
-    GpuCard .legend { height: auto; color: $text-muted; }
-    GpuCard DataTable {
+    }}
+    GpuCard .stats {{ height: 1; }}
+    GpuCard .legend {{ height: auto; color: $text-muted; }}
+    GpuCard DataTable {{
         height: auto;
-        max-height: 20;
+        max-height: {config.TABLE_MAX_HEIGHT};
         margin-top: 1;
-    }
+    }}
     """
 
     def __init__(self, monitor: Monitor, zen: bool = False, pending: bool = False, danger: bool = False):
@@ -240,7 +264,11 @@ class GpuCard(Vertical):
         self.stats = Static(classes="stats")
         self.bar = MemoryBar()
         self.legend = Static(classes="legend")
-        self.table = DataTable(zebra_stripes=True, cursor_type="row")
+        self.table = DataTable(
+            zebra_stripes=True,
+            cursor_type="row",
+            cell_padding=config.TABLE_CELL_PADDING,
+        )
         self._deferred: Optional[GPUInfo] = None  # update arriving before mount
         self._gpu: Optional[GPUInfo] = None
         self._sort_key: Optional[str] = None
@@ -478,7 +506,7 @@ class GpuCard(Vertical):
             for row_idx, proc in enumerate(procs):
                 row = []
                 for col_idx, col in enumerate(columns):
-                    row.append(col.render(self, proc))
+                    row.append(_fit_cell(col.render(self, proc), col.width))
                     if col.meta_key is not None:
                         value = proc.meta.get(col.meta_key)
                         if value is not None and is_progress(value) and value.get("value") is None:
@@ -501,17 +529,22 @@ class GpuCard(Vertical):
         self.danger = danger
 
     def _hover_changed(self, coord: Optional[Coordinate]):
-        """Show the full text of the hovered cell as the table's tooltip."""
+        """Show the full (untruncated) value of the hovered cell as a tooltip.
+
+        Recomputed from the process + column rather than read from the table,
+        so it stays complete even though the cell itself is clipped.
+        """
         table = self.table
-        if coord is None or not self._row_procs:
+        if (
+            coord is None
+            or not (0 <= coord.row < len(self._row_procs))
+            or not (0 <= coord.column < len(self._columns))
+        ):
             table.tooltip = None
             return
-        try:
-            value = table.get_cell_at(coord)
-        except Exception:
-            table.tooltip = None
-            return
-        text = value.plain if isinstance(value, Text) else str(value)
+        proc = self._row_procs[coord.row]
+        col = self._columns[coord.column]
+        text = self._clean_cell(col, proc)
         table.tooltip = text or None
 
     def on_mouse_down(self, event: events.MouseDown):

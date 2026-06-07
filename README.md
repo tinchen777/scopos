@@ -115,6 +115,21 @@ show an **ETA** (`· ~3m 20s`) estimated from how fast the bar is advancing.
   details and asks for confirmation before sending a terminate signal. The
   status bar shows a red `⚠ DANGER` reminder while it is armed.
 
+## Tuning the layout
+
+All the cosmetic knobs live in one place — [`src/scopos/config.py`](src/scopos/config.py).
+Edit it and restart `scopos` to adjust spacing and sizing without touching any
+logic:
+
+- `COLUMN_WIDTHS` — per-column width caps (clipped cells show `…`; `None` =
+  auto-size). Metadata columns are always shown in full.
+- `TABLE_CELL_PADDING` — the gap between columns.
+- `CARD_MIN_WIDTH` / `CARD_MAX_WIDTH` — how wide GPU cards get (and thus how
+  many tile per row).
+- `GRID_GUTTER` / `GRID_PADDING` / `CARD_PADDING` — spacing around and inside
+  cards.
+- `TABLE_MAX_HEIGHT` — how tall a table grows before it scrolls.
+
 ## Python API
 
 `scopos` doubles as a tiny library so your scripts can push live status to the

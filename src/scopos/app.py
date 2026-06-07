@@ -8,6 +8,7 @@ from textual.containers import (Container, Horizontal, VerticalScroll)
 from textual.widgets import (Footer, Static)
 from typing import (Dict, List, Optional)
 
+from . import config
 from .monitor import (GPUInfo, Monitor, DemoMonitor)
 from .widgets.grid import GpuCard
 from .widgets.others import (Clock, Logo, SysMeter)
@@ -21,59 +22,60 @@ class ScoposApp(App):
 
     # Roughly the narrowest a card stays readable; used to pick column count.
     # The full COMMAND column needs room, so cards stay wide and only tile into
-    # multiple columns on genuinely wide terminals.
-    CARD_MIN_WIDTH = 100
+    # multiple columns on genuinely wide terminals. (Tunable in scopos.config.)
+    CARD_MIN_WIDTH = config.CARD_MIN_WIDTH
 
-    CSS = """
-    Screen {
+    # Grid gutter / padding come from scopos.config so spacing can be tuned there.
+    CSS = f"""
+    Screen {{
         layout: vertical;
-    }
-    #topbar {
+    }}
+    #topbar {{
         height: 5;
         padding: 0 1;
         background: $panel;
-    }
-    #topbar Logo {
+    }}
+    #topbar Logo {{
         width: auto;
         height: 5;
         content-align: left top;
         background: $panel;
-    }
-    #topbar Clock {
+    }}
+    #topbar Clock {{
         width: auto;
         height: 4;
         padding-bottom: 0;
         content-align: center bottom;
-    }
-    #topbar #spacer1 {
+    }}
+    #topbar #spacer1 {{
         width: 1fr;
-    }
-    #topbar #spacer2 {
+    }}
+    #topbar #spacer2 {{
             width: 1fr;
-        }
-    #topbar SysMeter {
+        }}
+    #topbar SysMeter {{
         width: auto;
         height: 5;
         padding-right: 4;
         padding-bottom: 1;
         content-align: right bottom;
-    }
-    #grid {
+    }}
+    #grid {{
         layout: grid;
         grid-size: 1;
         grid-rows: auto;
-        grid-gutter: 1 2;
+        grid-gutter: {config.GRID_GUTTER[0]} {config.GRID_GUTTER[1]};
         height: auto;
-        padding: 1 2;
-    }
-    #body {
+        padding: {config.GRID_PADDING[0]} {config.GRID_PADDING[1]};
+    }}
+    #body {{
         height: 1fr;
-    }
-    #status {
+    }}
+    #status {{
         height: 1;
         padding: 0 2;
         color: $text-muted;
-    }
+    }}
     """
 
     # How often (seconds) indeterminate progress bars advance a frame.
