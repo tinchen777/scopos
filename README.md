@@ -115,6 +115,55 @@ show an **ETA** (`· ~3m 20s`) estimated from how fast the bar is advancing.
   details and asks for confirmation before sending a terminate signal. The
   status bar shows a red `⚠ DANGER` reminder while it is armed.
 
+## Tuning the layout & theme
+
+All the cosmetic knobs live in one place — [`src/scopos/config.py`](src/scopos/config.py).
+You can either edit that file, or **override any of it without touching the
+source** by dropping a `config.toml` (or `config.json`) into `~/.scopos`
+(honours `$SCOPOS_HOME`). Only the keys you list are overridden. Restart
+`scopos` after changing anything.
+
+**Layout / spacing**
+
+- `COLUMN_WIDTHS` — per-column width caps (clipped cells show `…`; `None` =
+  auto-size). Metadata columns are always shown in full.
+- `COLUMN_VISIBLE` — show/hide any built-in column.
+- `TABLE_CELL_PADDING` — the gap between columns.
+- `CARD_MIN_WIDTH` / `CARD_MAX_WIDTH` — how wide GPU cards get (and thus how
+  many tile per row).
+- `GRID_GUTTER` / `GRID_PADDING` / `CARD_PADDING` — spacing around and inside
+  cards.
+- `TABLE_MAX_HEIGHT` — how tall a table grows before it scrolls.
+
+**Colours / theme**
+
+- `USER_PALETTE` / `WATCH_USER_COLOR` — per-user colours and the watched user's
+  colour.
+- `PROGRESS_COLOR` / `BAR_TRACK_COLOR` — progress-bar fill and track.
+- `COLOR_OK` / `COLOR_WARN` / `COLOR_CRIT` and the `*_WARN` / `*_CRIT`
+  thresholds — the green/yellow/red status colours for GPU free memory, the
+  host RAM meter and temperature.
+
+Example `~/.scopos/config.toml`:
+
+```toml
+card_min_width = 90
+table_cell_padding = 2
+
+[column_widths]
+COMMAND = 30
+
+[column_visible]
+"S.START" = false
+
+[colors]
+progress = "magenta"
+watch_user = "bright_blue"
+```
+
+(TOML needs Python 3.11+, or the `tomli` package on older versions;
+`config.json` always works.)
+
 ## Python API
 
 `scopos` doubles as a tiny library so your scripts can push live status to the
