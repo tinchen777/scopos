@@ -70,7 +70,10 @@ def make_progress(
     elif total is not None:
         frac = (value / total) if total else 0.0
         frac = max(0.0, min(1.0, frac))
-        auto_label = f"{_trim(value)}/{_trim(total)}"
+        value_str = str(_trim(value))
+        total_str = str(_trim(total))
+        max_len = max(len(value_str), len(total_str))
+        auto_label = f"{value_str.rjust(max_len)}/{total_str.rjust(max_len)}"
     else:
         # value is not None
         # total is None

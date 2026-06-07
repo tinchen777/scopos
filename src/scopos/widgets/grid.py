@@ -64,7 +64,7 @@ class MemoryBar(Widget):
 
 Spinner_1 = ["⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"]
 Spinner_2 = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
-Waiting = "Waiting..."
+Waiting = " Waiting..."
 
 
 def _progress_text(data: Dict[str, Any]) -> str:
@@ -105,10 +105,12 @@ def render_progress(data: Dict[str, Any], frame: int = 0, width: int = config.PR
         # bar.append("▏", style="grey50")
 
         pos = frame % len(Spinner_1)
-        bar.append(Spinner_1[pos], style=color)
+        animate_str = Text(Spinner_1[pos], style=color)
         span = width - len(Waiting) - 1
         if span >= 0:
-            bar.append(Waiting, style=color)
+            animate_str.append(Waiting, style=color)
+        animate_str.align("center", width + 2)
+        bar.append(animate_str)
     else:
         bar.append("▕", style="grey50")
         if 0.0 <= frac <= 1.0:
@@ -123,11 +125,12 @@ def render_progress(data: Dict[str, Any], frame: int = 0, width: int = config.PR
     # ETA estimated by the Monitor from how fast the bar has been moving.
     eta = data.get("eta")
     if eta is not None:
+        bar.append(" [")
         if eta <= 0:
-            eta_str = Text("DONE", style=config.COLOR_OK)
+            bar.append("DONE", style=config.COLOR_OK)
         else:
-            eta_str = Text(f"~{fmt_duration(eta)}", style=label_color)
-        bar.append(f" [{eta_str}]")
+            bar.append(f"~{fmt_duration(eta)}", style=label_color)
+        bar.append("]")
 
     return bar
 

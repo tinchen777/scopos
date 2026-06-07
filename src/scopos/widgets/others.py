@@ -24,13 +24,7 @@ class Logo(Static):
         text.append(f"  v{__version__}\n", style="white dim")
         text.append(LOGO_DOWN, style="bold cyan")
         text.append(f"by {__author__}", style="white italic")
-        
-        
-        
-        # text = Text(LOGO, style="bold cyan")
-        # text.append(f"  v{__version__}\n", style="white")
-        # # text.append(f"  by {__author__}", style="white")
-        
+
         super().__init__(text)
 
 
