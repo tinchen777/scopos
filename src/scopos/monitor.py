@@ -220,7 +220,7 @@ class Monitor:
             for key, value in proc.meta.items():
                 if not is_progress(value):
                     continue
-                frac = value.get("value")
+                frac = value.get("frac")
                 if frac is None:  # indeterminate bars have no ETA
                     continue
                 hkey = (proc.pid, key)
@@ -523,6 +523,7 @@ class DemoMonitor(Monitor):
     # -- demo collection ---------------------------------------------------
     def collect(self) -> List[GPUInfo]:
         self._ensure_jobs()
+        assert self._jobs is not None
         rng = random.Random()  # only util/temperature jitter is random per tick
         gpus: List[GPUInfo] = []
         for gpu_id in range(4):
@@ -549,6 +550,7 @@ class DemoMonitor(Monitor):
     def collect_pending(self, gpu_pids: set) -> List[ProcInfo]:
         """The watched user's CPU-only (never-on-GPU) reporting jobs."""
         self._ensure_jobs()
+        assert self._jobs is not None
         user = self.watch_user or "frank"
         pending = [
             self._job_proc(job) for job in self._jobs

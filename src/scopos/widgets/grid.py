@@ -62,58 +62,73 @@ class MemoryBar(Widget):
         return text
 
 
-# Width, in cells, of a rendered progress bar inside a table cell.
-PROGRESS_WIDTH = 14
+Spinner_1 = ["⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"]
+Spinner_2 = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+Waiting = "Waiting..."
 
 
-def _clamp01(value: Any) -> float:
-    try:
-        x = float(value)
-    except (TypeError, ValueError):
-        return 0.0
-    return max(0.0, min(1.0, x))
+def _progress_text(data: Dict[str, Any]) -> str:
+    """A plain-text summary of a progress field, for tooltips / clipboard."""
+    shown = str(data.get("label"))
+    eta = data.get("eta")
+    if eta is not None:
+        shown += " [DONE]" if eta <= 0 else f" [~{fmt_duration(eta)}]"
+    return shown
 
 
-def render_progress(data: Dict[str, Any], frame: int = 0, width: int = PROGRESS_WIDTH) -> Text:
+def render_progress(data: Dict[str, Any], frame: int = 0, width: int = config.PROGRESS_WIDTH) -> Text:
     """Render a progress field (see :func:`scopos.metadata.make_progress`).
 
     A determinate bar fills proportionally to its value; an indeterminate bar
     (``value is None``) shows a block that bounces back and forth, advancing by
     ``frame`` so the TUI can animate it between refreshes.
     """
-    value = data.get("value")
+    frac = data.get("frac")
     label = data.get("label")
     color = data.get("color") or config.PROGRESS_COLOR
+    label_color = config.PROGRESS_LABEL_COLOR
     track = config.BAR_TRACK_COLOR
+    width = int(max(1, width))
     bar = Text(no_wrap=True, overflow="crop")
-    bar.append("▕", style="grey50")
-    if value is None:
-        block = max(2, width // 4)
-        span = width - block
-        if span <= 0:
-            bar.append("█" * width, style=color)
-        else:
-            cycle = span * 2
-            p = frame % cycle
-            pos = p if p <= span else cycle - p
-            bar.append("░" * pos, style=track)
-            bar.append("█" * block, style=color)
-            bar.append("░" * (span - pos), style=track)
-        bar.append("▏", style="grey50")
-        bar.append(f" {label}" if label else " …", style="dim")
+    if frac is None:
+        # block = 1
+        # span = width - block
+        # if span <= 0:
+        #     bar.append("█" * width, style=color)
+        # else:
+        #     cycle = span * 2
+        #     p = frame % cycle
+        #     pos = p if p <= span else cycle - p
+        #     bar.append("<" * pos, style=track)
+        #     bar.append("■" * block, style=color)
+        #     bar.append(">" * (span - pos), style=track)
+        # bar.append("▏", style="grey50")
+
+        pos = frame % len(Spinner_1)
+        bar.append(Spinner_1[pos], style=color)
+        span = width - len(Waiting) - 1
+        if span >= 0:
+            bar.append(Waiting, style=color)
     else:
-        frac = _clamp01(value)
-        filled = max(0, min(width, int(round(frac * width))))
-        bar.append("█" * filled, style=color)
-        bar.append("░" * (width - filled), style=track)
+        bar.append("▕", style="grey50")
+        if 0.0 <= frac <= 1.0:
+            filled = int(round(frac * width))
+            bar.append("■" * filled, style=color)
+            bar.append(">" * (width - filled), style=track)
+        else:
+            bar.append("-" * width, style=track)
         bar.append("▏", style="grey50")
-        shown = label if label is not None else f"{frac * 100:.0f}%"
-        bar.append(f" {shown}", style="dim")
-        # ETA estimated by the Monitor from how fast the bar has been moving.
-        eta = data.get("eta")
-        if eta is not None:
-            tail = "done" if eta <= 0 else f"~{fmt_duration(eta)}"
-            bar.append(f" · {tail}", style=config.COLOR_OK if eta <= 0 else config.PROGRESS_COLOR)
+    # label
+    bar.append(str(label), style=label_color)
+    # ETA estimated by the Monitor from how fast the bar has been moving.
+    eta = data.get("eta")
+    if eta is not None:
+        if eta <= 0:
+            eta_str = Text("DONE", style=config.COLOR_OK)
+        else:
+            eta_str = Text(f"~{fmt_duration(eta)}", style=label_color)
+        bar.append(f" [{eta_str}]")
+
     return bar
 
 
@@ -152,7 +167,7 @@ def _user_cell(card: "GpuCard", p: ProcInfo) -> Text:
     return Text(f"● {p.user}", style=card.monitor.color_for(p.user))
 
 
-def fmt_gb(num_bytes: float) -> str:
+def _fmt_gb(num_bytes: float) -> str:
     return "%.2f" % (num_bytes / (1024 ** 3))
 
 
@@ -163,23 +178,23 @@ def _w(key: str) -> Optional[int]:
     return config.COLUMN_WIDTHS.get(key)
 
 
+def _visible(key: str) -> bool:
+    """Whether a built-in column is shown (config.COLUMN_VISIBLE, default True)."""
+    return config.COLUMN_VISIBLE.get(key, True)
+
+
 ALL_COLUMNS: List[_Column] = [
     _Column("PID", "PID", lambda p: p.pid, lambda c, p: str(p.pid), width=_w("PID")),
     _Column("USER", "USER", lambda p: p.user.lower(), _user_cell, width=_w("USER")),
     _Column("NO.", "NO.", lambda p: (p.user.lower(), p.number), lambda c, p: p.number, width=_w("NO.")),
-    _Column("MEM/GB", "MEM/GB", lambda p: p.mem, lambda c, p: fmt_gb(p.mem), width=_w("MEM/GB")),
-    _Column("RAM/GB", "RAM/GB", lambda p: p.rss, lambda c, p: fmt_gb(p.rss), width=_w("RAM/GB")),
+    _Column("MEM/GB", "MEM/GB", lambda p: p.mem, lambda c, p: _fmt_gb(p.mem), width=_w("MEM/GB")),
+    _Column("RAM/GB", "RAM/GB", lambda p: p.rss, lambda c, p: _fmt_gb(p.rss), width=_w("RAM/GB")),
     _Column("RUNTIME", "RUNTIME", lambda p: p.runtime_sec, lambda c, p: p.runtime, width=_w("RUNTIME")),
     _Column("SESSION", "SESSION", lambda p: p.sname.lower(), lambda c, p: p.sname, width=_w("SESSION")),
     _Column("S.START", "S.START", lambda p: p.s_start_ts, lambda c, p: p.s_start, width=_w("S.START")),
     _Column("COMMAND", "COMMAND", lambda p: p.cmd.lower(), lambda c, p: p.cmd, width=_w("COMMAND")),
 ]
 COLS: Dict[str, _Column] = {c.key: c for c in ALL_COLUMNS}
-
-
-def _visible(key: str) -> bool:
-    """Whether a built-in column is shown (config.COLUMN_VISIBLE, default True)."""
-    return config.COLUMN_VISIBLE.get(key, True)
 
 
 # The classic, show-everything layout (minus any columns hidden in config).
@@ -194,19 +209,6 @@ CPU_FIXED_KEYS = ("PID", "NO.", "RAM/GB", "RUNTIME", "SESSION")
 
 # Columns that read most naturally largest-first on the initial click.
 DESC_FIRST_KEYS = {"PID", "MEM/GB", "RAM/GB", "RUNTIME", "S.START"}
-
-
-def _progress_text(data: Dict[str, Any]) -> str:
-    """A plain-text summary of a progress field, for tooltips / clipboard."""
-    value = data.get("value")
-    label = data.get("label")
-    if value is None:
-        return label or "…"
-    shown = label if label is not None else f"{value * 100:.0f}%"
-    eta = data.get("eta")
-    if eta is not None:
-        shown += " (done)" if eta <= 0 else f" (~{fmt_duration(eta)})"
-    return shown
 
 
 def _fit_cell(value: Any, width: Optional[int]) -> Any:
@@ -228,7 +230,7 @@ def _fit_cell(value: Any, width: Optional[int]) -> Any:
 def _meta_sort_value(value: Any):
     """A sort key for a metadata cell that never compares across types."""
     if is_progress(value):
-        v = value.get("value")
+        v = value.get("frac")
         return (0, -1.0 if v is None else float(v))
     if value is None:
         return (2, "")
@@ -360,10 +362,10 @@ class GpuCard(Vertical):
         self._deferred = None
         self._gpu = gpu
         if self.is_pending:
-            self.border_title = " 🧮 CPU  ·  tracked processes (scopos API) "
+            self.border_title = " 🧮  <CPU>  ·  tracked process(es) from scopos API "
             self._update_pending_stats(gpu)
         else:
-            self.border_title = f" # {gpu.index}  {gpu.name} "
+            self.border_title = f" # {gpu.index}  <{gpu.name}> "
             self._update_stats(gpu)
             self._update_bar(gpu)
             self._update_legend(gpu)
@@ -372,9 +374,8 @@ class GpuCard(Vertical):
     def _update_pending_stats(self, gpu: GPUInfo):
         rss_total = sum(p.rss for p in gpu.procs)
         line = Text(no_wrap=True, overflow="ellipsis")
-        line.append("[CPU] ", style="bold cyan")
-        line.append(f"{len(gpu.procs)} proc(s)", style="bold")
-        line.append(f"    [RAM] {fmt_gb(rss_total)} GB", style="bold")
+        line.append(f"[PROC] {len(gpu.procs)}", style="bold")
+        line.append(f"    [RAM] {_fmt_gb(rss_total)} GB", style="bold")
         line.append("  ·  host-memory view of this user's scopos-reporting jobs", style="dim")
         self.stats.update(line)
 
@@ -393,12 +394,12 @@ class GpuCard(Vertical):
         line.append(f"{len(gpu.procs)}    ", style="bold")
         # USED
         line.append("[USED] ", style="bold")
-        line.append(f"{fmt_gb(gpu.mem_used)}", style="bold")
-        line.append(f" / {fmt_gb(gpu.mem_total)} GB", style="dim")
+        line.append(f"{_fmt_gb(gpu.mem_used)}", style="bold")
+        line.append(f" / {_fmt_gb(gpu.mem_total)} GB", style="dim")
         line.append(f" ({gpu.used_rate * 100:.0f}%)    ")
         # FREE
         line.append("[FREE] ", style="bold")
-        line.append(f"{fmt_gb(gpu.mem_free)} GB ", style=free_style)
+        line.append(f"{_fmt_gb(gpu.mem_free)} GB ", style=free_style)
         # ⚡
         if gpu.util >= 0:
             line.append("   [⚡] ", style="bold")
@@ -437,7 +438,7 @@ class GpuCard(Vertical):
             else:
                 # normal mode
                 legend.append(f"● {user}", style=color)
-            legend.append(f" {fmt_gb(mem)} GB ({pct:.0f}%)   ")
+            legend.append(f" {_fmt_gb(mem)} GB ({pct:.0f}%)   ")
         self.legend.update(legend)
 
     # -- table helpers -----------------------------------------------------
@@ -519,7 +520,7 @@ class GpuCard(Vertical):
                     row.append(_fit_cell(col.render(self, proc), col.width))
                     if col.meta_key is not None:
                         value = proc.meta.get(col.meta_key)
-                        if value is not None and is_progress(value) and value.get("value") is None:
+                        if value is not None and is_progress(value) and value.get("frac") is None:
                             self._anim_cells.append((row_idx, col_idx, value))
                 self.table.add_row(*row)
         else:

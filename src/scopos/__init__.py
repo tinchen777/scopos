@@ -13,7 +13,7 @@ live status (plain fields and progress bars) to the monitor::
 """
 
 __author__ = "Zhen Tian"
-__version__ = "3.0.1"
+__version__ = "3.1.0"
 
 # Public reporting API. Kept import-light (no Textual / NVML) so any program
 # can ``import scopos`` just to report status.

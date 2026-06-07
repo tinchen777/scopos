@@ -6,14 +6,13 @@ import time
 from rich.text import Text
 from textual.widgets import Static
 
-from .. import __version__
+from .. import (__version__, __author__)
 from .. import config
 from ..monitor import Monitor
 
-
-LOGO = r"""  ___   ___  _____  ____  _____  ___  
- / __) / __)(  _  )(  _ \(  _  )/ __) 
- \__ \( (__  )(_)(  )___/ )(_)( \__ \ 
+LOGO_UP = r"""  ___   ___  _____  ____  _____  ___  
+ / __) / __)(  _  )(  _ \(  _  )/ __) """
+LOGO_DOWN = r""" \__ \( (__  )(_)(  )___/ )(_)( \__ \ 
  (___/ \___)(_____)(__)  (_____)(___/ """
 
 
@@ -21,8 +20,17 @@ class Logo(Static):
     """The SCOPOS ASCII logo, pinned top-left."""
 
     def __init__(self):
-        text = Text(LOGO, style="bold cyan")
-        text.append(f"  v{__version__}", style="dim white")
+        text = Text(LOGO_UP, style="bold cyan")
+        text.append(f"  v{__version__}\n", style="white dim")
+        text.append(LOGO_DOWN, style="bold cyan")
+        text.append(f"by {__author__}", style="white italic")
+        
+        
+        
+        # text = Text(LOGO, style="bold cyan")
+        # text.append(f"  v{__version__}\n", style="white")
+        # # text.append(f"  by {__author__}", style="white")
+        
         super().__init__(text)
 
 

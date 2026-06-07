@@ -62,7 +62,7 @@ CARD_PADDING = (0, 1)
 # --- process table --------------------------------------------------------
 
 # Horizontal space on each side of a table cell — i.e. the gap between columns.
-TABLE_CELL_PADDING = 1
+TABLE_CELL_PADDING = 0
 
 # How tall a card's table may get (in rows) before it scrolls internally.
 TABLE_MAX_HEIGHT = 20
@@ -80,7 +80,7 @@ COLUMN_WIDTHS: Dict[str, Optional[int]] = {
     "MEM/GB": 8,
     "RAM/GB": 8,
     "RUNTIME": 9,
-    "SESSION": 16,
+    "SESSION": 10,
     "S.START": 18,
     "COMMAND": 40,
 }
@@ -123,8 +123,10 @@ USER_PALETTE: List[str] = [
 WATCH_USER_COLOR = "bright_blue"
 
 # Progress bars.
-PROGRESS_COLOR = "cyan"        # default bar fill when a report doesn't set one
+PROGRESS_WIDTH = 14            # Width, in cells, of a rendered progress bar inside a table cell.
+PROGRESS_COLOR = "white"       # default bar fill when a report doesn't set one
 BAR_TRACK_COLOR = "grey35"     # the unfilled part of bars
+PROGRESS_LABEL_COLOR = "dim"   # the percentage/label text shown next to bars
 
 # Generic status colours (used for the GPU free-memory & host-RAM indicators).
 COLOR_OK = "green"

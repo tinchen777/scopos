@@ -64,20 +64,25 @@ def make_progress(
     The returned ``dict`` is JSON-serialisable and is recognised by the TUI
     via :data:`PROGRESS_MARKER`.
     """
-    frac: Optional[float]
-    auto_label: Optional[str] = None
     if value is None:
         frac = None
+        auto_label = "-/-"
     elif total is not None:
         frac = (value / total) if total else 0.0
+        frac = max(0.0, min(1.0, frac))
         auto_label = f"{_trim(value)}/{_trim(total)}"
     else:
+        # value is not None
+        # total is None
         frac = float(value)
-    if frac is not None:
-        frac = max(0.0, min(1.0, frac))
+        if 0.0 <= value <= 1.0:
+            auto_label = f"{frac * 100:.0f}%"
+        else:
+            auto_label = str(frac)
+
     return {
         PROGRESS_MARKER: True,
-        "value": frac,
+        "frac": frac,
         "label": label if label is not None else auto_label,
         "color": color,
     }
