@@ -12,10 +12,11 @@ import pynvml as pn
 import psutil
 import time
 import random
+import subprocess
 from dataclasses import (dataclass, field)
 from typing import (Any, Dict, List, Tuple, Optional)
 
-from .metadata.utils import (make_progress, read_fields)
+from .metadata.utils import (make_progress, read_fields, is_progress, iter_pids)
 
 # A palette of visually distinct colours assigned to users in order of
 # first appearance. Names are Rich/Textual colour names so they render the
@@ -106,6 +107,23 @@ def fmt_duration(seconds: int) -> str:
     return f"{s}s"
 
 
+class _HostProc:
+    """Minimal stand-in for an NVML process record, for non-GPU processes.
+
+    It exposes the same ``pid`` / ``usedGpuMemory`` attributes that
+    :meth:`Monitor._build_proc` reads, but reports the process's host RSS as
+    its "memory" so the PENDING card's MEM column shows something useful while
+    a job is still loading, before it touches the GPU.
+    """
+
+    def __init__(self, pid: int):
+        self.pid = pid
+        try:
+            self.usedGpuMemory = int(psutil.Process(pid).memory_info().rss)
+        except Exception:
+            self.usedGpuMemory = 0
+
+
 class Monitor:
     """Collects GPU snapshots, keeping per-user state stable across refreshes."""
 
@@ -115,6 +133,11 @@ class Monitor:
         self._user_colors: Dict[str, str] = {}
         self._next_color = 0
         self._initialised = False
+        # (pid, field) -> (t0, value0): when a progress bar was first seen and
+        # at what value, so we can estimate a time-to-completion across refreshes.
+        self._prog_hist: Dict[Tuple[int, str], Tuple[float, float]] = {}
+        # pane_pid -> tmux session name, rebuilt each ``collect`` cycle.
+        self._tmux_panes: Dict[int, str] = {}
         if self.watch_user:
             # Make sure the watched user always gets `bright_red`.
             self._user_colors.setdefault(self.watch_user, "bright_blue")
@@ -152,6 +175,7 @@ class Monitor:
     # -- collection ---------------------------------------------------
     def collect(self) -> List[GPUInfo]:
         self.start()
+        self._tmux_panes = self._tmux_pane_map()
         gpus: List[GPUInfo] = []
 
         for gpu_id in range(pn.nvmlDeviceGetCount()):
@@ -186,7 +210,75 @@ class Monitor:
                 )
             gpus.append(gpu)
         self._assign_numbers(gpus)
+        self._annotate_eta([p for g in gpus for p in g.procs])
         return gpus
+
+    # -- progress ETA ------------------------------------------------------
+    def _annotate_eta(self, procs: List[ProcInfo]):
+        """Estimate a time-to-completion for every determinate progress bar.
+
+        A progress value carries no timing of its own, so we remember when each
+        ``(pid, field)`` bar was first seen and at what fraction, then project
+        the remaining time from the rate of progress since then.  The estimate
+        is written back into the progress dict as ``"eta"`` (seconds) for the
+        renderer to show; it resets if the bar ever moves backwards (a restart).
+        """
+        now = time.time()
+        live = set()
+        for proc in procs:
+            for key, value in proc.meta.items():
+                if not is_progress(value):
+                    continue
+                frac = value.get("value")
+                if frac is None:  # indeterminate bars have no ETA
+                    continue
+                hkey = (proc.pid, key)
+                live.add(hkey)
+                prev = self._prog_hist.get(hkey)
+                if prev is None or frac < prev[1] - 1e-9:
+                    # First sighting, or progress went backwards: (re)start the clock.
+                    self._prog_hist[hkey] = (now, frac)
+                    continue
+                if frac >= 1.0:
+                    value["eta"] = 0.0
+                    continue
+                t0, v0 = prev
+                dv, dt = frac - v0, now - t0
+                if dv > 0 and dt > 0:
+                    value["eta"] = (1.0 - frac) / (dv / dt)
+        # Forget bars whose process (or field) is gone, so the map can't grow
+        # without bound on a long-running monitor.
+        for hkey in [k for k in self._prog_hist if k not in live]:
+            del self._prog_hist[hkey]
+
+    # -- pending (not-yet-on-GPU) processes --------------------------------
+    def collect_pending(self, gpu_pids: set) -> List[ProcInfo]:
+        """Processes that reported to Scopos but haven't allocated GPU memory yet.
+
+        These are discovered purely from the metadata files under
+        ``~/.scopos/metadata``, independent of NVML, so a job shows up while it
+        is still loading data / importing CUDA, before it appears on any GPU.
+        Filtered to the watched user (when set) and to live processes that are
+        not already listed on a GPU.
+        """
+        pending: List[ProcInfo] = []
+        for pid in iter_pids():
+            if pid in gpu_pids:
+                continue
+            info = self._build_proc(_HostProc(pid))
+            if info is None:
+                continue
+            if self.watch_user and info.user != self.watch_user:
+                continue
+            if not info.meta:  # only show processes that actually reported something
+                continue
+            pending.append(info)
+        self._annotate_eta(pending)
+        synthetic = GPUInfo(-1, "", 0, 0, 0, -1, -1, procs=pending)
+        for p in pending:
+            synthetic.user_mems[p.user] = synthetic.user_mems.get(p.user, 0) + p.mem
+        self._assign_numbers([synthetic])
+        return pending
 
     def _assign_numbers(self, gpus: List[GPUInfo]):
         """Fill in each process's "parentNo-childNo" label.
@@ -235,29 +327,40 @@ class Monitor:
         # runtime
         runtime_sec = int(time.time() - p.create_time())
         runtime = fmt_duration(runtime_sec)
-        # session
-        session = p
-        while p:
-            pp = p.parent()
-            if pp:
-                if pp.pid == 1:
-                    session = p
-                    break
-            else:
+        # session: walk up to the process whose parent is PID 1, recording the
+        # ancestor chain on the way (needed to map tmux panes to sessions).
+        chain: List[psutil.Process] = []
+        node: Optional[psutil.Process] = p
+        seen = set()
+        while node is not None and node.pid not in seen:
+            seen.add(node.pid)
+            chain.append(node)
+            try:
+                pp = node.parent()
+            except Exception:
+                pp = None
+            if pp is None or pp.pid == 1:
                 break
-            p = pp
+            node = pp
+        session = chain[-1]
         sname = session.name()
-        if "tmux" in sname.lower():
-            # 修改这里我想要获取tmux的session的名称作为sname
-            pass
-            
-            
-        
-        
-        
         sid = session.pid
+        s_proc = session
+        # For a tmux-managed process the top-level "session" is the shared tmux
+        # *server*; the meaningful unit is the pane, so resolve its session name
+        # and treat the pane's shell as the session instead.
+        if "tmux" in sname.lower():
+            pane = self._tmux_session_for(chain)
+            if pane is not None:
+                pane_pid, tname = pane
+                sname = f"tmux:{tname}" if tname else "tmux"
+                sid = pane_pid
+                try:
+                    s_proc = psutil.Process(pane_pid)
+                except Exception:
+                    s_proc = session
         # session_start_time
-        s_start_ts = session.create_time()
+        s_start_ts = s_proc.create_time()
         s_start = time.strftime("%y-%m-%d %H:%M:%S", time.localtime(s_start_ts))
 
         # Fields this process reported to Scopos, if any.
@@ -265,6 +368,46 @@ class Monitor:
 
         # number is assigned later, once every GPU has been collected.
         return ProcInfo(pid=pid, pname=name, user=user, mem=mem, runtime=runtime, cmd=cmd, runtime_sec=runtime_sec, sname=sname, sid=sid, s_start=s_start, s_start_ts=s_start_ts, meta=meta)
+
+    # -- tmux --------------------------------------------------------------
+    def _tmux_pane_map(self) -> Dict[int, str]:
+        """Map each tmux pane's shell PID to its session name.
+
+        Only the *running user's* tmux server is reachable (its socket lives in
+        a per-user, 0700 directory), so panes belonging to other users can't be
+        named and fall back to a plain "tmux".  Returns ``{}`` when tmux is not
+        installed or no server is running.
+        """
+        try:
+            out = subprocess.run(
+                ["tmux", "list-panes", "-a", "-F", "#{pane_pid} #{session_name}"],
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                timeout=1, check=False,
+            )
+        except Exception:
+            return {}
+        mapping: Dict[int, str] = {}
+        for line in out.stdout.decode("utf-8", "replace").splitlines():
+            head, _, name = line.partition(" ")
+            try:
+                mapping[int(head)] = name.strip()
+            except ValueError:
+                pass
+        return mapping
+
+    def _tmux_session_for(self, chain) -> Optional[Tuple[int, str]]:
+        """Find the tmux pane owning a process, given its ancestor chain.
+
+        Returns the deepest ancestor that is a known pane shell (i.e. the
+        process's own pane) as ``(pane_pid, session_name)``, or ``None``.
+        """
+        if not self._tmux_panes:
+            return None
+        for node in chain:
+            name = self._tmux_panes.get(node.pid)
+            if name is not None:
+                return node.pid, name
+        return None
 
 
 class DemoMonitor(Monitor):
@@ -361,7 +504,7 @@ class DemoMonitor(Monitor):
                         cmd=cmd,
                         runtime_sec=runtime_sec,
                         sid=sid,
-                        sname=rng.choice(["bash", "zsh", "sbatch", "tmux"]),
+                        sname=rng.choice(["bash", "zsh", "sbatch", "tmux:main", "tmux:exp1", "tmux:train"]),
                         s_start=s_start,
                         s_start_ts=s_start_ts,
                         number="",
@@ -373,7 +516,42 @@ class DemoMonitor(Monitor):
             gpu.mem_free = total - used
             gpus.append(gpu)
         self._assign_numbers(gpus)
+        self._annotate_eta([p for g in gpus for p in g.procs])
         return gpus
+
+    def collect_pending(self, gpu_pids: set) -> List[ProcInfo]:
+        """Fabricate a couple of "still loading" processes for the watched user.
+
+        Lets ``--demo --zen`` show the PENDING card (jobs that have reported to
+        Scopos but haven't allocated GPU memory yet).
+        """
+        rng = random.Random()
+        user = self.watch_user or "frank"
+        self.color_for(user)
+        pending: List[ProcInfo] = []
+        for _ in range(rng.randint(0, 2)):
+            runtime_sec = rng.randint(1, 120)
+            s_start_ts = time.time() - runtime_sec
+            pending.append(
+                ProcInfo(
+                    pid=rng.randint(10000, 99999),
+                    pname="python",
+                    user=user,
+                    mem=rng.randint(1, 8) * 1024 ** 3,  # stands in for host RSS
+                    runtime=fmt_duration(runtime_sec),
+                    cmd="python train.py --epochs 100 --fp16",
+                    runtime_sec=runtime_sec,
+                    sid=rng.randint(1000, 9999),
+                    sname=rng.choice(["bash", "tmux:train"]),
+                    s_start=time.strftime("%y-%m-%d %H:%M:%S", time.localtime(s_start_ts)),
+                    s_start_ts=s_start_ts,
+                    number="",
+                    meta={"stage": "warmup", "epoch": make_progress(label="loading data")},
+                )
+            )
+        synthetic = GPUInfo(-1, "", 0, 0, 0, -1, -1, procs=pending)
+        self._assign_numbers([synthetic])
+        return pending
 
 
 def _decode(value) -> str:
