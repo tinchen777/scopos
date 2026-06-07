@@ -201,30 +201,34 @@ class ScoposApp(App):
         self.call_after_refresh(self._relayout_columns)
 
     def _sync_pending(self, gpus: List[GPUInfo]):
-        """Create/update/remove the PENDING card (zen + watched user only)."""
-        pending: List = []
-        if self.zen and self.monitor.watch_user:
-            gpu_pids = {p.pid for g in gpus for p in g.procs}
-            try:
-                pending = self.monitor.collect_pending(gpu_pids)
-            except Exception:
-                pending = []
-        if pending:
-            if self._pending_card is None:
-                card = GpuCard(self.monitor, zen=True, pending=True, danger=self.danger)
-                self._pending_card = card
-                grid = self.query_one("#grid")
-                if self._cards:
-                    grid.mount(card, before=next(iter(self._cards.values())))
-                else:
-                    grid.mount(card)
+        """Keep the CPU card resident in zen mode (for the watched user).
+
+        It lists every process of the watched user that reports to scopos but
+        isn't currently on a GPU, and stays on screen even when empty so the
+        host-memory view is always available in zen mode.
+        """
+        if not (self.zen and self.monitor.watch_user):
+            if self._pending_card is not None:
+                self._pending_card.remove()
+                self._pending_card = None
                 self.call_after_refresh(self._relayout_columns)
-            self._pending_card.set_danger(self.danger)
-            self._pending_card.update(GPUInfo(-1, "PENDING", 0, 0, 0, -1, -1, procs=pending))
-        elif self._pending_card is not None:
-            self._pending_card.remove()
-            self._pending_card = None
+            return
+        gpu_pids = {p.pid for g in gpus for p in g.procs}
+        try:
+            pending = self.monitor.collect_pending(gpu_pids)
+        except Exception:
+            pending = []
+        if self._pending_card is None:
+            card = GpuCard(self.monitor, zen=True, pending=True, danger=self.danger)
+            self._pending_card = card
+            grid = self.query_one("#grid")
+            if self._cards:
+                grid.mount(card, before=next(iter(self._cards.values())))
+            else:
+                grid.mount(card)
             self.call_after_refresh(self._relayout_columns)
+        self._pending_card.set_danger(self.danger)
+        self._pending_card.update(GPUInfo(-1, "CPU", 0, 0, 0, -1, -1, procs=pending))
 
     def _update_status(self, gpus: List[GPUInfo]):
         n_proc = sum(len(g.procs) for g in gpus)
