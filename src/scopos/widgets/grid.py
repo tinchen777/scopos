@@ -64,7 +64,7 @@ class MemoryBar(Widget):
 
 Spinner_1 = ["⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"]
 Spinner_2 = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
-Waiting = " Waiting..."
+Waiting = " waiting..."
 
 
 def _progress_text(data: Dict[str, Any]) -> str:
@@ -109,7 +109,7 @@ def render_progress(data: Dict[str, Any], frame: int = 0, width: int = config.PR
         span = width - len(Waiting) - 1
         if span >= 0:
             animate_str.append(Waiting, style=color)
-        animate_str.align("center", width + 2)
+        animate_str.align("center", width + 3)
         bar.append(animate_str)
     else:
         bar.append("▕", style="grey50")
@@ -129,7 +129,7 @@ def render_progress(data: Dict[str, Any], frame: int = 0, width: int = config.PR
         if eta <= 0:
             bar.append("DONE", style=config.COLOR_OK)
         else:
-            bar.append(f"~{fmt_duration(eta)}", style=label_color)
+            bar.append(f"~{fmt_duration(eta)}", style="yellow")
         bar.append("]")
 
     return bar
@@ -379,7 +379,7 @@ class GpuCard(Vertical):
         line = Text(no_wrap=True, overflow="ellipsis")
         line.append(f"[PROC] {len(gpu.procs)}", style="bold")
         line.append(f"    [RAM] {_fmt_gb(rss_total)} GB", style="bold")
-        line.append("  ·  host-memory view of this user's scopos-reporting jobs", style="dim")
+        line.append(f"  ·  host-memory view of {self.monitor.watch_user}'s scopos-reporting jobs", style="dim")
         self.stats.update(line)
 
     def _update_stats(self, gpu: GPUInfo):
@@ -498,23 +498,15 @@ class GpuCard(Vertical):
             columns = self._columns_for(procs)
             self._columns = columns
             # column labels
-            labels = []
-            sort_func = None
             for col in columns:
                 label = col.label
                 if col.key == self._sort_key:
-                    label = f"{label} {'▼' if self._sort_reverse else '▲'}"
+                    # label = f"{label} {'▼' if self._sort_reverse else '▲'}"
+                    label = label if col.width is None else label.center(col.width)
+                    label = Text(label, style="reverse" if self._sort_reverse else "reverse underline")
                     if col.sort is not None:
-                        sort_func = col.sort
-                labels.append(label)
-            # Built-in columns get a width cap (content is clipped in the cell
-            # but kept whole for the hover tooltip); metadata columns auto-size
-            # so user-reported fields and progress bars always show in full.
-            for col, label in zip(columns, labels):
+                        procs = sorted(procs, key=col.sort, reverse=self._sort_reverse)
                 self.table.add_column(label, width=col.width)
-            # sort process
-            if sort_func is not None:
-                procs = sorted(procs, key=sort_func, reverse=self._sort_reverse)
             self._row_procs = procs
             # rows
             for row_idx, proc in enumerate(procs):
@@ -615,7 +607,7 @@ class GpuCard(Vertical):
         # Show the full row (same fields as "copy info") so it's easy to be sure
         # this is the right process before sending a signal.
         msg = (
-            "⚠ Kill this process? This sends a terminate signal and cannot be undone.\n\n"
+            "⚠ Kill this process?\nThis sends a terminate signal and cannot be undone.\n\n"
             f"{self._row_info(proc)}"
         )
         self.app.push_screen(

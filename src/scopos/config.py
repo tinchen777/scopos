@@ -62,7 +62,7 @@ CARD_PADDING = (0, 1)
 # --- process table --------------------------------------------------------
 
 # Horizontal space on each side of a table cell — i.e. the gap between columns.
-TABLE_CELL_PADDING = 0
+TABLE_CELL_PADDING = 1
 
 # How tall a card's table may get (in rows) before it scrolls internally.
 TABLE_MAX_HEIGHT = 20
@@ -76,13 +76,13 @@ TABLE_MAX_HEIGHT = 20
 COLUMN_WIDTHS: Dict[str, Optional[int]] = {
     "PID": 7,
     "USER": 12,
-    "NO.": 7,
-    "MEM/GB": 8,
-    "RAM/GB": 8,
-    "RUNTIME": 9,
+    "NO.": 5,
+    "MEM/GB": 6,
+    "RAM/GB": 6,
+    "RUNTIME": 7,
     "SESSION": 10,
-    "S.START": 18,
-    "COMMAND": 40,
+    "S.START": 17,
+    "COMMAND": 30,
 }
 
 # Which built-in columns to show.  Set any to ``False`` to hide it (metadata
@@ -124,7 +124,7 @@ WATCH_USER_COLOR = "bright_blue"
 
 # Progress bars.
 PROGRESS_WIDTH = 14            # Width, in cells, of a rendered progress bar inside a table cell.
-PROGRESS_COLOR = "white"       # default bar fill when a report doesn't set one
+PROGRESS_COLOR = "bold white"       # default bar fill when a report doesn't set one
 BAR_TRACK_COLOR = "grey35"     # the unfilled part of bars
 PROGRESS_LABEL_COLOR = "dim"   # the percentage/label text shown next to bars
 

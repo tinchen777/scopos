@@ -21,7 +21,7 @@ class Logo(Static):
 
     def __init__(self):
         text = Text(LOGO_UP, style="bold cyan")
-        text.append(f"  v{__version__}\n", style="white dim")
+        text.append(f"  v{__version__}\n", style="dim white")
         text.append(LOGO_DOWN, style="bold cyan")
         text.append(f"by {__author__}", style="white italic")
 
@@ -92,6 +92,7 @@ class Clock(Static):
     def update_clock(self):
         now = time.localtime()
         text = Text(justify="left")
-        text.append(time.strftime("%Y-%m-%d  ", now), style="bold")
-        text.append(time.strftime("%H:%M:%S", now), style="bold cyan")
+        text.append(time.strftime("%Y-%m-%d\n", now), style="bold")
+        text.append(time.strftime("  %A\n", now), style="italic")
+        text.append(time.strftime(" %H:%M:%S", now), style="bold cyan")
         self.update(text)

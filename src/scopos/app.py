@@ -157,16 +157,23 @@ class ScoposApp(App):
         """Switch between the normal layout and the focused 'zen' layout."""
         self.zen = not self.zen
         self.refresh_data()
+        self.notify(
+            "ZEN mode ON" if self.zen else "ZEN mode OFF",
+            title="Zen" if self.zen else "Normal",
+            severity="warning" if self.zen else "information",
+            timeout=4,
+        )
 
     def action_toggle_danger(self):
         """Arm/disarm right-click process killing (still confirmed per-kill)."""
         self.danger = not self.danger
         self.refresh_data()
         self.notify(
-            "DANGER mode ON — right-click a process to Kill it (you'll be asked to confirm)"
-            if self.danger else "DANGER mode off",
+            "DANGER mode ON\n — right-click a process to Kill it (you'll be asked to confirm)"
+            if self.danger else "DANGER mode OFF",
+            title="⚠ DANGER" if self.danger else "Safe",
             severity="warning" if self.danger else "information",
-            timeout=4,
+            timeout=6,
         )
 
     def refresh_data(self):
