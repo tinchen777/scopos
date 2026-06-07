@@ -505,9 +505,9 @@ class GpuCard(Vertical):
         event.stop()
         event.prevent_default()
         proc = self._row_procs[coord.row]
-        options: List[Tuple[str, str]] = [("copy", "📋  Copy row info")]
+        options: List[Tuple[str, str]] = [("copy", "📋 Copy info")]
         if self.danger:
-            options.append(("kill", f"💀  Kill process (PID {proc.pid})"))
+            options.append(("kill", f"💀 Kill process (PID {proc.pid})"))
         x = getattr(event, "screen_x", event.x)
         y = getattr(event, "screen_y", event.y)
         self.app.push_screen(
@@ -531,9 +531,9 @@ class GpuCard(Vertical):
         """A clean, plain-text value for a cell (progress bars become text)."""
         if col.meta_key is not None:
             raw = proc.meta.get(col.meta_key)
-            if is_progress(raw):
-                return _progress_text(raw)
-            return "" if raw is None else str(raw)
+            if raw is None:
+                return ""
+            return _progress_text(raw) if is_progress(raw) else str(raw)
         value = col.render(self, proc)
         return value.plain if isinstance(value, Text) else str(value)
 
@@ -547,7 +547,7 @@ class GpuCard(Vertical):
 
     def _confirm_kill(self, proc: ProcInfo):
         msg = (
-            f"⚠  Kill process PID {proc.pid} ({proc.user})?\n\n"
+            f"⚠ Kill process PID {proc.pid} ({proc.user})?\n\n"
             f"{proc.cmd}\n\n"
             "This sends a terminate signal to the process and cannot be undone."
         )
