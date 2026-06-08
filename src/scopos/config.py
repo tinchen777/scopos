@@ -195,7 +195,7 @@ def _apply_overrides(data: dict) -> None:
 
     for name in (
         "CARD_MIN_WIDTH", "CARD_MAX_WIDTH", "TABLE_CELL_PADDING", "TABLE_MAX_HEIGHT",
-        "WATCH_USER_COLOR", "PROGRESS_COLOR", "BAR_TRACK_COLOR",
+        "FOCUS_USER_COLOR", "PROGRESS_COLOR", "BAR_TRACK_COLOR",
         "COLOR_OK", "COLOR_WARN", "COLOR_CRIT",
         "MEM_FREE_WARN", "MEM_FREE_CRIT", "SYS_MEM_WARN", "SYS_MEM_CRIT",
         "SYS_BAR_MAX", "SYS_BAR_MIN", "SYS_METER_MIN",
@@ -222,7 +222,7 @@ def _apply_overrides(data: dict) -> None:
     if isinstance(colors, dict):
         alias = {
             "progress": "PROGRESS_COLOR", "bar_track": "BAR_TRACK_COLOR",
-            "watch_user": "WATCH_USER_COLOR", "ok": "COLOR_OK",
+            "focus_user": "FOCUS_USER_COLOR", "ok": "COLOR_OK",
             "warn": "COLOR_WARN", "crit": "COLOR_CRIT", "temp": "TEMP_COLOR",
         }
         for key, name in alias.items():

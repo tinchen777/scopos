@@ -79,10 +79,28 @@ scopos -u alice --zen
 
 ---
 
+## Tabs / modes
+
+A tab bar under the logo switches between four views (cycle with <kbd>m</kbd>,
+or jump with <kbd>g</kbd> / <kbd>z</kbd> / <kbd>t</kbd> / <kbd>i</kbd>; start on
+one with `-m/--mode`):
+
+- **Global** — every GPU, every user (the classic layout).
+- **Zen** — focused on `-u/--user` (see below).
+- **Tmux** — a tree of *your own* tmux sessions → panes → processes, with the
+  same reported-metadata shown inline. Right-click a process, pane or session
+  to copy it; in danger mode you can also kill it. Killing a pane or session
+  that holds several processes asks for confirmation and lists every process
+  that will be terminated.
+- **Info** — scopos version and this host's basic specs (CPU, RAM, GPUs).
+
+> tmux sockets are per-user, so the Tmux tab shows the tmux server of the user
+> running `scopos`.
+
 ## Zen mode
 
-Press <kbd>z</kbd> at any time (or start with `--zen`) to toggle **zen mode**, a
-focused layout meant to be paired with `-u/--user`:
+Switch to **zen mode** (<kbd>z</kbd>, or start with `-m zen`), a focused layout
+meant to be paired with `-u/--user`:
 
 - Each GPU's **table** lists only the watched user's processes.
 - The per-GPU **bar and legend still show every user** — the watched user is
@@ -110,10 +128,10 @@ show an **ETA** (`· ~3m 20s`) estimated from how fast the bar is advancing.
 - **Right-click** a process row for a menu: *Copy row info* copies that row's
   fields to the clipboard.
 - **Danger mode** (<kbd>ctrl</kbd>+<kbd>shift</kbd>+<kbd>k</kbd>) is an
-  independent toggle that works in both normal and zen layouts. While it is on,
-  the right-click menu also offers **Kill process**, which shows the full row
-  details and asks for confirmation before sending a terminate signal. The
-  status bar shows a red `⚠ DANGER` reminder while it is armed.
+  independent toggle that works in every mode. While it is on, the right-click
+  menu also offers **Kill**, which shows the full details and asks for
+  confirmation before sending a terminate signal. The status bar shows a red
+  `⚠ DANGER` reminder while it is armed.
 
 ## Tuning the layout & theme
 
