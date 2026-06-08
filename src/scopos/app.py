@@ -86,7 +86,8 @@ class ScoposApp(App):
         padding: {config.GRID_PADDING[0]} {config.GRID_PADDING[1]};
     }}
     #tabs {{
-        height: auto;
+        /* Textual 8: auto height may expand and starve the content switcher. */
+        height: 3;
     }}
     #switcher {{
         height: 1fr;
