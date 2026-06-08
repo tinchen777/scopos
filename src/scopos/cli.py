@@ -39,9 +39,10 @@ def parse_args(argv=None) -> argparse.Namespace:
         help="Run with synthetic GPU data (no NVIDIA driver required).",
     )
     parser.add_argument(
-        "-z",
-        "--zen",
-        action="store_true",
+        "-m",
+        "--mode",
+        type=str,
+        default="global",
         help="Start in zen (focus) mode: tables show only --user's processes "
         "plus the fields they report via the scopos Python API. Toggle with 'z'.",
     )
@@ -57,10 +58,10 @@ def parse_args(argv=None) -> argparse.Namespace:
 def main(argv=None):
     args = parse_args(argv)
     app = ScoposApp(
-        watch_user=args.user,
+        focus_user=args.user,
         interval=args.interval,
         demo=args.demo,
         theme=args.theme,
-        zen=args.zen,
+        mode=args.mode,
     )
     app.run()

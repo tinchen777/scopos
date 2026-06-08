@@ -12,7 +12,7 @@ from textual.widgets import (DataTable, Static)
 from typing import (Any, Callable, Dict, List, Optional, Tuple)
 
 from ..metadata.utils import is_progress
-from ..monitor import (GPUInfo, Monitor, ProcInfo, fmt_duration)
+from ..monitor import (DeviceInfo, GPUInfo, Monitor, ProcInfo, fmt_duration)
 from .dialogs import (ConfirmScreen, ContextMenu)
 from .. import config
 
@@ -154,7 +154,7 @@ class _Column:
         key: str,
         label: str,
         sort: Optional[Callable],
-        render: Callable[["Card", ProcInfo], Any],
+        render: Callable[[DeviceCard, ProcInfo], Any],
         meta_key: Optional[str] = None,
         width: Optional[int] = None,
     ):
@@ -166,7 +166,7 @@ class _Column:
         self.width = width
 
 
-def _user_cell(card: "Card", p: ProcInfo) -> Text:
+def _user_cell(card: DeviceCard, p: ProcInfo) -> Text:
     return Text(f"● {p.user}", style=card.monitor.color_for(p.user))
 
 
@@ -243,7 +243,7 @@ def _meta_sort_value(value: Any):
         return (1, str(value).lower())
 
 
-class Card(Vertical):
+class DeviceCard(Vertical):
     """Base card: a header, a stats line and a process table.
 
     All of the shared behaviour lives here — sorting, progress animation, hover
@@ -279,10 +279,9 @@ class Card(Vertical):
     }}
     """
 
-    def __init__(self, monitor: Monitor, zen: bool = False, danger: bool = False):
+    def __init__(self, monitor: Monitor, danger: bool = False):
         super().__init__()
         self.monitor = monitor
-        self.zen = zen
         # ``danger`` only changes what the right-click menu offers (adds Kill).
         self.danger = danger
         self.stats = Static(classes="stats")
@@ -291,8 +290,8 @@ class Card(Vertical):
             cursor_type="row",
             cell_padding=config.TABLE_CELL_PADDING,
         )
-        self._deferred: Optional[GPUInfo] = None  # update arriving before mount
-        self._gpu: Optional[GPUInfo] = None
+        self._deferred: Optional[DeviceInfo] = None  # update arriving before mount
+        self._device: Optional[DeviceInfo] = None
         self._sort_key: Optional[str] = None
         self._sort_reverse: bool = False
         self._columns: List[_Column] = NORMAL_COLUMNS
@@ -302,16 +301,6 @@ class Card(Vertical):
         self._anim_cells: List[Tuple[int, int, Dict[str, Any]]] = []
         self._frame: int = 0
 
-    # -- composition -------------------------------------------------------
-    def compose(self):
-        yield self.stats
-        yield from self._extra_widgets()
-        yield self.table
-
-    def _extra_widgets(self):
-        """Header widgets between the stats line and the table (GPU adds a bar)."""
-        return iter(())
-
     def on_mount(self):
         # Keep the table's tooltip in sync with the cell under the mouse so a
         # long, truncated column can be read in full just by hovering it.
@@ -320,13 +309,6 @@ class Card(Vertical):
             self._apply(self._deferred)
 
     # -- mode --------------------------------------------------------------
-    def set_zen(self, zen: bool):
-        if zen == self.zen:
-            return
-        self.zen = zen
-        if self._gpu is not None and self.is_mounted:
-            self._apply(self._gpu)
-
     def set_danger(self, danger: bool):
         """Danger mode only affects whether the menu offers Kill (no re-render)."""
         self.danger = danger
@@ -345,8 +327,8 @@ class Card(Vertical):
         else:
             self._sort_key = col.key
             self._sort_reverse = col.key in DESC_FIRST_KEYS
-        if self._gpu is not None:
-            self._update_table(self._gpu)
+        if self._device is not None:
+            self._update_table(self._device)
 
     # -- animation ---------------------------------------------------------
     def animate_progress(self, frame: int):
@@ -366,34 +348,32 @@ class Card(Vertical):
                 pass
 
     # -- updating ----------------------------------------------------------
-    def update(self, gpu: GPUInfo):
+    def update(self, device: DeviceInfo):
         # A card may be updated in the same frame it is mounted, before its
         # columns exist; defer until on_mount in that case.
-        if not self.is_mounted:
-            self._deferred = gpu
-            return
-        self._apply(gpu)
+        if self.is_mounted:
+            self._apply(device)
+        else:
+            self._deferred = device
 
-    def _apply(self, gpu: GPUInfo):
+    def _apply(self, device: DeviceInfo):
         self._deferred = None
-        self._gpu = gpu
-        self._render_header(gpu)
-        self._update_table(gpu)
+        self._device = device
+        self._render_header(device)
+        self._update_table(device)
 
     # -- header / columns / procs (subclass-specific) ----------------------
-    def _render_header(self, gpu: GPUInfo):
-        """Set the border title and stats line (and any header widgets)."""
+    def _render_header(self, device: DeviceInfo):
         raise NotImplementedError
 
     def _fixed_keys(self) -> Tuple[str, ...]:
-        """Built-in columns (besides metadata + COMMAND) for the zen layout."""
-        return ZEN_FIXED_KEYS
+        raise NotImplementedError
 
-    def _visible_procs(self, gpu: GPUInfo) -> List[ProcInfo]:
-        return list(gpu.procs)
+    def _visible_procs(self, device: DeviceInfo) -> List[ProcInfo]:
+        raise NotImplementedError
 
     def _empty_message(self) -> str:
-        return "— no compute processes —"
+        raise NotImplementedError
 
     def _columns_for(self, procs: List[ProcInfo]) -> List[_Column]:
         # Metadata-centric layout: fixed columns + one column per reported field
@@ -409,7 +389,7 @@ class Card(Vertical):
         return cols or [COLS["PID"]]  # never leave the table column-less
 
     def _meta_column(self, key: str) -> _Column:
-        def render(card: "Card", proc: ProcInfo, _key: str = key) -> Any:
+        def render(card: DeviceCard, proc: ProcInfo, _key: str = key) -> Any:
             value = proc.meta.get(_key)
             if value is None:
                 return Text("")
@@ -425,13 +405,13 @@ class Card(Vertical):
             meta_key=key,
         )
 
-    def _update_table(self, gpu: GPUInfo):
+    def _update_table(self, device: DeviceInfo):
         # Rebuild columns each time so the sort arrow can move between headers
         # and metadata columns can appear/disappear with the data.
         self.table.clear(columns=True)
         self._anim_cells = []
 
-        procs = self._visible_procs(gpu)
+        procs = self._visible_procs(device)
 
         if procs:
             columns = self._columns_for(procs)
@@ -561,39 +541,56 @@ class Card(Vertical):
             pass
 
 
-class GpuCard(Card):
+class GpuCard(DeviceCard):
     """One GPU: header, stats line, proportion bar, legend and process table."""
 
     def __init__(self, monitor: Monitor, zen: bool = False, danger: bool = False):
-        super().__init__(monitor, zen=zen, danger=danger)
+        super().__init__(monitor, danger=danger)
         self.bar = MemoryBar()
         self.legend = Static(classes="legend")
+        self.zen = zen
 
-    def _extra_widgets(self):
+    def compose(self):
+        yield self.stats
         yield self.bar
         yield self.legend
+        yield self.table
 
-    def _render_header(self, gpu: GPUInfo):
-        self.border_title = f" # {gpu.index}  <{gpu.name}> "
+    # -- mode --------------------------------------------------------------
+    def set_zen(self, zen: bool):
+        if zen == self.zen:
+            return
+        self.zen = zen
+        if self._device is not None and self.is_mounted:
+            self._apply(self._device)
+
+    def _render_header(self, device: DeviceInfo):
+        assert isinstance(device, GPUInfo)
+        gpu = device
+        self.border_title = f" # {gpu.id}  <{gpu.name}> "
         self._update_stats(gpu)
         self._update_bar(gpu)
         self._update_legend(gpu)
 
+    def _fixed_keys(self) -> Tuple[str, ...]:
+        """Built-in columns (besides metadata + COMMAND) for the zen layout."""
+        return ZEN_FIXED_KEYS
+
+    def _visible_procs(self, device: DeviceInfo) -> List[ProcInfo]:
+        """In zen mode the table is filtered down to the watched user."""
+        if self.zen:
+            return [p for p in device.procs if p.user == self.monitor.focus_user]
+        return list(device.procs)
+
     # Normal mode shows every column; zen mode uses the metadata layout (base).
     def _columns_for(self, procs: List[ProcInfo]) -> List[_Column]:
-        if not self.zen:
-            return NORMAL_COLUMNS or [COLS["PID"]]
-        return super()._columns_for(procs)
-
-    def _visible_procs(self, gpu: GPUInfo) -> List[ProcInfo]:
-        """In zen mode the table is filtered down to the watched user."""
-        if self.zen and self.monitor.watch_user:
-            return [p for p in gpu.procs if p.user == self.monitor.watch_user]
-        return list(gpu.procs)
+        if self.zen:
+            return super()._columns_for(procs)
+        return NORMAL_COLUMNS or [COLS["PID"]]
 
     def _empty_message(self) -> str:
-        if self.zen and self.monitor.watch_user:
-            return f"— no processes for [{self.monitor.watch_user}] —"
+        if self.zen:
+            return f"— no processes for [{self.monitor.focus_user}] —"
         return "— no compute processes —"
 
     def _update_stats(self, gpu: GPUInfo):
@@ -618,9 +615,9 @@ class GpuCard(Card):
         line.append("[FREE] ", style="bold")
         line.append(f"{_fmt_gb(gpu.mem_free)} GB ", style=free_style)
         # ⚡
-        if gpu.util >= 0:
+        if gpu.mem_util >= 0:
             line.append("   [⚡] ", style="bold")
-            line.append(f"{gpu.util}%", style=config.TEMP_COLOR)
+            line.append(f"{gpu.mem_util}%", style=config.TEMP_COLOR)
         # 🌡
         if gpu.temperature >= 0:
             line.append("   [🌡] ", style="bold")
@@ -641,14 +638,13 @@ class GpuCard(Card):
             self.legend.update(legend)
             return
         mvp = ordered[0][0]
-        watch = self.monitor.watch_user
         for user, mem in ordered:
             color = self.monitor.color_for(user)
             pct = mem / gpu.mem_total * 100 if gpu.mem_total else 0
             # In zen mode the watched user is highlighted in the legend even
             # though the table is filtered down to just their processes.
             legend.append("🏆 " if user == mvp else "")
-            if self.zen and bool(watch) and user == watch:
+            if self.zen and user == self.monitor.focus_user:
                 # zen mode
                 legend.append("★ ", style=color)
                 legend.append(user, style=f"bold underline {color}")
@@ -659,25 +655,30 @@ class GpuCard(Card):
         self.legend.update(legend)
 
 
-class CpuCard(Card):
+class CpuCard(DeviceCard):
     """The watched user's non-GPU, scopos-reporting processes (host-RAM view).
 
     Parallel to :class:`GpuCard` but with no GPU memory column and no bar/legend;
     it extends scopos to plain CPU jobs and to jobs not yet on a GPU. A job that
     later allocates GPU memory shows up under its GPU card automatically.
     """
+    def compose(self):
+        yield self.stats
+        yield self.table
 
-    def _render_header(self, gpu: GPUInfo):
-        self.border_title = " 🧮  <CPU>  ·  tracked process(es) from scopos API "
-        rss_total = sum(p.rss for p in gpu.procs)
+    def _render_header(self, device: DeviceInfo):
+        self.border_title = f" 🧮  <{device.name}>  ·  tracked process(es) of {self.monitor.focus_user} via scopos API "
+        rss_total = sum(p.rss for p in device.procs)
         line = Text(no_wrap=True, overflow="ellipsis")
-        line.append(f"[PROC] {len(gpu.procs)}", style="bold")
+        line.append(f"[PROC] {len(device.procs)}", style="bold")
         line.append(f"    [RAM] {_fmt_gb(rss_total)} GB", style="bold")
-        line.append(f"  ·  host-memory view of {self.monitor.watch_user}'s scopos-reporting jobs", style="dim")
         self.stats.update(line)
 
     def _fixed_keys(self) -> Tuple[str, ...]:
         return CPU_FIXED_KEYS
+
+    def _visible_procs(self, device: DeviceInfo) -> List[ProcInfo]:
+        return list(device.procs)
 
     def _empty_message(self) -> str:
         return "— no scopos-reporting processes —"

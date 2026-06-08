@@ -103,7 +103,7 @@ def _trim(num: float):
 
 
 # -- reading ---------------------------------------------------------------
-def iter_pids() -> list:
+def fetch_pids() -> list:
     """Return the PIDs that currently have a metadata file, newest first.
 
     Used by the TUI to discover processes that reported to Scopos but may not

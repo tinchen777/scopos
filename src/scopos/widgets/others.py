@@ -3,13 +3,13 @@
 
 from __future__ import annotations
 import time
+import psutil
 from rich.text import Text
 from textual.widgets import Static
-from typing import Optional
+from typing import (Optional, Dict)
 
 from .. import (__version__, __author__)
 from .. import config
-from ..monitor import Monitor
 
 LOGO_UP = r"""  ___   ___  _____  ____  _____  ___  
  / __) / __)(  _  )(  _ \(  _  )/ __) """
@@ -39,18 +39,18 @@ class SysMeter(Static):
     }
     """
 
-    def __init__(self, monitor: Monitor):
+    def __init__(self, interval: int):
         super().__init__()
-        self.monitor = monitor
+        self.interval = interval
 
     def on_mount(self):
         self.refresh_stats()
         # Re-render once layout has settled (sibling sizes are known by then).
         self.call_after_refresh(self.refresh_stats)
-        self.set_interval(2.0, self.refresh_stats)
+        self.set_interval(self.interval, self.refresh_stats)
 
     def refresh_stats(self):
-        stats = self.monitor.system_stats()
+        stats = self._system_stats()
         budget = self._budget()
         text = Text(justify="right")
         text.append(self._line("Mem", *stats["mem"], budget=budget))
@@ -80,11 +80,13 @@ class SysMeter(Static):
             avail = full
         return max(config.SYS_METER_MIN, min(full, avail))
 
-    def _full_width(self) -> int:
-        # Widest meter: "Mem " + ▕bar▏ + " 1234.5 / 1234.5 GB" + " 100%".
-        return 4 + 1 + config.SYS_BAR_MAX + 1 + 19 + 5
+    @staticmethod
+    def _full_width() -> int:
+        # Widest meter: "Mem" + ▕bar▏ + " 1234.5 / 1234.5 GB" + "100%".
+        return 3 + 1 + config.SYS_BAR_MAX + 1 + 19 + 4
 
-    def _line(self, label: str, used: float, total: float, budget: int) -> Text:
+    @staticmethod
+    def _line(label: str, used: float, total: float, budget: int) -> Text:
         total = total or 1
         frac = max(0.0, min(1.0, used / total))
         if frac >= config.SYS_MEM_CRIT:
@@ -94,10 +96,9 @@ class SysMeter(Static):
         else:
             color = config.COLOR_OK
         gb = 1024 ** 3
-        prefix = f"{label} "
         # Fixed-width so the two lines (Mem / Swp) always line up.
-        gb_txt = f" {used / gb:5.1f} / {total / gb:5.1f} GB"
-        pct_txt = f" {frac * 100:3.0f}%"
+        gb_txt = f"{used / gb:5.1f} / {total / gb:5.1f} GB "
+        pct_txt = f"{frac * 100:3.0f}%"
         ends = 2  # the ▕ ▏ bar caps
 
         # Largest-first: try bar + both texts, then drop GB, then drop the
@@ -105,14 +106,14 @@ class SysMeter(Static):
         show_gb = show_pct = True
         for show_gb, show_pct in ((True, True), (False, True), (False, False)):
             suffix = (len(gb_txt) if show_gb else 0) + (len(pct_txt) if show_pct else 0)
-            bar = budget - len(prefix) - ends - suffix
+            bar = budget - len(label) - ends - suffix
             if bar >= config.SYS_BAR_MIN:
                 break
         bar = max(1, min(config.SYS_BAR_MAX, bar))
         filled = round(frac * bar)
 
         line = Text()
-        line.append(prefix, style="bold")
+        line.append(label, style="bold")
         line.append("▕", style="grey50")
         line.append("█" * filled, style=color)
         line.append("░" * (bar - filled), style=config.BAR_TRACK_COLOR)
@@ -123,6 +124,15 @@ class SysMeter(Static):
             line.append(pct_txt, style=color)
         return line
 
+    @staticmethod
+    def _system_stats() -> Dict[str, tuple]:
+        """Return host RAM/swap usage as {"mem": (used, total), "swap": (...)}."""
+        vm = psutil.virtual_memory()
+        sm = psutil.swap_memory()
+
+        return {"mem": (vm.used, vm.total), "swap": (sm.used, sm.total)}
+
+
 
 class Clock(Static):
     """Timestamp of the latest data refresh, pinned top-right.
@@ -132,9 +142,8 @@ class Clock(Static):
     reflects when the displayed data was collected.
     """
 
-    def __init__(self, interval: int):
+    def __init__(self):
         super().__init__()
-        self.interval = interval  # kept for compatibility; no longer self-ticks
 
     def on_mount(self):
         # Initial value; replaced by the app's first refresh moments later.

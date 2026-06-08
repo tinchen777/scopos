@@ -15,10 +15,10 @@ import random
 import subprocess
 import contextlib
 from dataclasses import (dataclass, field)
-from typing import (Any, Dict, List, Tuple, Optional)
+from typing import (Any, Set, Dict, List, Tuple, Optional)
 
 from . import config
-from .metadata.utils import (make_progress, read_fields, is_progress, iter_pids)
+from .metadata.utils import (make_progress, read_fields, is_progress, fetch_pids)
 
 # A palette of visually distinct colours assigned to users in order of first
 # appearance, so a given user keeps the same colour in tables, bars and legends.
@@ -53,18 +53,37 @@ class ProcInfo:
 
 
 @dataclass
-class GPUInfo:
+class DeviceInfo:
+    """A snapshot of one GPU or CPU, with its processes and per-user aggregates."""
+
+    name: str
+    procs: List[ProcInfo] = field(default_factory=list, init=False)
+
+
+@dataclass
+class CPUInfo(DeviceInfo):
+    """A snapshot of one CPU and the processes running on it."""
+
+    user_rsss: Dict[str, int] = field(default_factory=dict, init=False)
+
+    def mvp(self) -> Optional[str]:
+        """Return the user holding the most memory on this CPU, if any."""
+        if not self.user_rsss:
+            return None
+        return max(self.user_rsss.items(), key=lambda kv: kv[1])[0]
+
+
+@dataclass
+class GPUInfo(DeviceInfo):
     """A snapshot of one GPU and the processes running on it."""
 
-    index: int
-    name: str
+    id: int
     mem_used: int
     mem_total: int
     mem_free: int
-    util: int  # core utilisation %, -1 if unknown
+    mem_util: int  # core utilisation %, -1 if unknown
     temperature: int  # degrees C, -1 if unknown
-    procs: List[ProcInfo] = field(default_factory=list)
-    user_mems: Dict[str, int] = field(default_factory=dict)
+    user_mems: Dict[str, int] = field(default_factory=dict, init=False)
 
     @property
     def idle_rate(self) -> float:
@@ -113,21 +132,20 @@ class _HostProc:
 class Monitor:
     """Collects GPU snapshots, keeping per-user state stable across refreshes."""
 
-    def __init__(self, watch_user: str = ""):
-        self.watch_user = watch_user.strip()
+    def __init__(self, focus_user: str):
+        self.focus_user = focus_user.strip()
         # username -> colour, assigned on first sight and kept forever.
         self._user_colors: Dict[str, str] = {}
         self._next_color = 0
-        self._initialised = False
+        self._pn_initialised = False
         # (pid, field) -> (t0, value0, last_seen): when a progress bar was first
         # seen and at what value (plus when last updated), so we can estimate a
         # time-to-completion across refreshes and prune stale entries by age.
         self._prog_hist: Dict[Tuple[int, str], Tuple[float, float, float]] = {}
         # pane_pid -> tmux session name, rebuilt each ``collect`` cycle.
         self._tmux_panes: Dict[int, str] = {}
-        if self.watch_user:
-            # Make sure the watched user always gets `bright_red`.
-            self._user_colors.setdefault(self.watch_user, config.WATCH_USER_COLOR)
+
+        self._user_colors.setdefault(self.focus_user, config.FOCUS_USER_COLOR)
 
     # -- colours -----------------------------------------------------------
     def color_for(self, user: str) -> str:
@@ -139,31 +157,24 @@ class Monitor:
 
     # -- lifecycle ---------------------------------------------------------
     def start(self):
-        if not self._initialised:
+        if not self._pn_initialised:
             pn.nvmlInit()
-            self._initialised = True
+            self._pn_initialised = True
 
     def stop(self):
-        if self._initialised:
+        if self._pn_initialised:
             try:
                 pn.nvmlShutdown()
             except Exception:
                 pass
-            self._initialised = False
-
-    # -- system memory -----------------------------------------------------
-    def system_stats(self) -> Dict[str, tuple]:
-        """Return host RAM/swap usage as {"mem": (used, total), "swap": (...)}."""
-        vm = psutil.virtual_memory()
-        sm = psutil.swap_memory()
-
-        return {"mem": (vm.used, vm.total), "swap": (sm.used, sm.total)}
+            self._pn_initialised = False
 
     # -- collection ---------------------------------------------------
-    def collect(self) -> List[GPUInfo]:
+    def collect_GPU(self) -> Tuple[List[GPUInfo], List[ProcInfo]]:
         self.start()
         self._tmux_panes = self._tmux_pane_map()
         gpus: List[GPUInfo] = []
+        gpu_procs: List[ProcInfo] = []
 
         for gpu_id in range(pn.nvmlDeviceGetCount()):
             handle = pn.nvmlDeviceGetHandleByIndex(gpu_id)
@@ -180,7 +191,7 @@ class Monitor:
             except Exception:
                 temp = -1
 
-            gpu = GPUInfo(gpu_id, name, used, total, free, util, temp)
+            gpu = GPUInfo(id=gpu_id, name=name, mem_used=used, mem_total=total, mem_free=free, mem_util=util, temperature=temp)
 
             try:
                 processes = pn.nvmlDeviceGetComputeRunningProcesses_v2(handle)
@@ -188,17 +199,19 @@ class Monitor:
                 processes = []
 
             for process in processes:
-                info = self._build_proc(process)
-                if info is None:
+                proc = self._build_proc(process)
+                if proc is None:
                     continue
-                gpu.procs.append(info)
-                gpu.user_mems[info.user] = (
-                    gpu.user_mems.get(info.user, 0) + info.mem
-                )
+                gpu.procs.append(proc)
+                gpu.user_mems.setdefault(proc.user, 0)
+                gpu.user_mems[proc.user] += proc.mem
+
+                gpu_procs.append(proc)
             gpus.append(gpu)
-        self._assign_numbers(gpus)
-        self._annotate_eta([p for g in gpus for p in g.procs])
-        return gpus
+        self._assign_numbers(gpu_procs)
+        self._annotate_eta(gpu_procs)
+
+        return gpus, gpu_procs
 
     # -- progress ETA ------------------------------------------------------
     def _annotate_eta(self, procs: List[ProcInfo]):
@@ -243,7 +256,7 @@ class Monitor:
             del self._prog_hist[hkey]
 
     # -- pending (not-yet-on-GPU) processes --------------------------------
-    def collect_pending(self, gpu_pids: set) -> List[ProcInfo]:
+    def collect_CPU(self, gpu_pids: Set[int]) -> CPUInfo:
         """Processes that reported to Scopos but haven't allocated GPU memory yet.
 
         These are discovered purely from the metadata files under
@@ -252,26 +265,27 @@ class Monitor:
         Filtered to the watched user (when set) and to live processes that are
         not already listed on a GPU.
         """
-        pending: List[ProcInfo] = []
-        for pid in iter_pids():
+        cpu = CPUInfo(name="CPU")
+
+        for pid in fetch_pids():
             if pid in gpu_pids:
                 continue
-            info = self._build_proc(_HostProc(pid))
-            if info is None:
+            proc = self._build_proc(_HostProc(pid))
+            if proc is None:
                 continue
-            if self.watch_user and info.user != self.watch_user:
+            if proc.user != self.focus_user:
                 continue
-            if not info.meta:  # only show processes that actually reported something
-                continue
-            pending.append(info)
-        self._annotate_eta(pending)
-        synthetic = GPUInfo(-1, "", 0, 0, 0, -1, -1, procs=pending)
-        for p in pending:
-            synthetic.user_mems[p.user] = synthetic.user_mems.get(p.user, 0) + p.mem
-        self._assign_numbers([synthetic])
-        return pending
+            # if not proc.meta:  # only show processes that actually reported something
+            #     continue
+            cpu.procs.append(proc)
+            cpu.user_rsss.setdefault(proc.user, 0)
+            cpu.user_rsss[proc.user] += proc.rss
+        self._annotate_eta(cpu.procs)
+        self._assign_numbers(cpu.procs)
 
-    def _assign_numbers(self, gpus: List[GPUInfo]):
+        return cpu
+
+    def _assign_numbers(self, procs: List[ProcInfo]):
         """Fill in each process's "parentNo-childNo" label.
 
         Numbering is per user and spans every GPU: a user's parent processes
@@ -280,18 +294,17 @@ class Monitor:
         """
         user_sids: Dict[str, List[int]] = {}
         child_count: Dict[Tuple[str, int], int] = {}
-        for gpu in gpus:
-            for proc in gpu.procs:
-                sids = user_sids.setdefault(proc.user, [])
-                if proc.sid not in sids:
-                    sids.append(proc.sid)
-                s_no = sids.index(proc.sid) + 1
-                if proc.sid == proc.pid:
-                    proc.number = f"{s_no:02d}"
-                else:
-                    key = (proc.user, proc.sid)
-                    child_count[key] = child_count.get(key, 0) + 1
-                    proc.number = f"{s_no:02d}-{child_count[key]:02d}"
+        for proc in procs:
+            sids = user_sids.setdefault(proc.user, [])
+            if proc.sid not in sids:
+                sids.append(proc.sid)
+            s_no = sids.index(proc.sid) + 1
+            if proc.sid == proc.pid:
+                proc.number = f"{s_no:02d}"
+            else:
+                key = (proc.user, proc.sid)
+                child_count[key] = child_count.get(key, 0) + 1
+                proc.number = f"{s_no:02d}-{child_count[key]:02d}"
 
     def _build_proc(self, process) -> Optional[ProcInfo]:
         # pid
@@ -370,7 +383,8 @@ class Monitor:
         return ProcInfo(pid=pid, pname=name, user=user, mem=mem, runtime=runtime, cmd=cmd, runtime_sec=runtime_sec, sname=sname, sid=sid, s_start=s_start, s_start_ts=s_start_ts, rss=rss, meta=meta)
 
     # -- tmux --------------------------------------------------------------
-    def _tmux_pane_map(self) -> Dict[int, str]:
+    @staticmethod
+    def _tmux_pane_map() -> Dict[int, str]:
         """Map each tmux pane's shell PID to its session name.
 
         Only the *running user's* tmux server is reachable (its socket lives in
@@ -427,8 +441,8 @@ class DemoMonitor(Monitor):
     ]
     GPU_TOTAL_GB = [24, 80, 80, 80]
 
-    def __init__(self, watch_user: str = ""):
-        super().__init__(watch_user=watch_user)
+    def __init__(self, focus_user: str = ""):
+        super().__init__(focus_user=focus_user)
         self._jobs: Optional[List[Dict[str, Any]]] = None
 
     # -- lifecycle ---------------------------------------------------------
@@ -444,8 +458,7 @@ class DemoMonitor(Monitor):
         if self._jobs is not None:
             return
         rng = random.Random(42)
-        watch = self.watch_user or "frank"
-        users = ["alice", "bob", "carol", watch]
+        users = ["alice", "bob", "carol", self.focus_user]
         scripts = ["train.py", "finetune.py", "eval.py", "main.py"]
         now = time.time()
         pid = 10001
@@ -483,12 +496,12 @@ class DemoMonitor(Monitor):
             for _ in range(rng.randint(1, 3)):
                 jobs.append(make(rng.choice(users), gpu_id))
         # Make sure the watched user has a couple of GPU jobs to focus on.
-        jobs.append(make(watch, 0))
-        jobs.append(make(watch, 2))
+        jobs.append(make(self.focus_user, 0))
+        jobs.append(make(self.focus_user, 2))
         # CPU-only jobs for the watched user (these populate the CPU card). They
         # always report something, since only API users appear there.
         for _ in range(2):
-            jobs.append(make(watch, None, kind=rng.choice(["determinate", "warmup"])))
+            jobs.append(make(self.focus_user, None, kind=rng.choice(["determinate", "warmup"])))
         self._jobs = jobs
 
     def _job_meta(self, job: Dict[str, Any]) -> Dict[str, Any]:
@@ -521,7 +534,7 @@ class DemoMonitor(Monitor):
         )
 
     # -- demo collection ---------------------------------------------------
-    def collect(self) -> List[GPUInfo]:
+    def collect_GPU(self) -> Tuple[List[GPUInfo], List[ProcInfo]]:
         self._ensure_jobs()
         assert self._jobs is not None
         rng = random.Random()  # only util/temperature jitter is random per tick
@@ -529,8 +542,7 @@ class DemoMonitor(Monitor):
         for gpu_id in range(4):
             total = self.GPU_TOTAL_GB[gpu_id] * 1024 ** 3
             gpus.append(GPUInfo(
-                gpu_id, self.GPU_NAMES[gpu_id], 0, total, total,
-                rng.randint(0, 100), rng.randint(35, 85),
+                id=gpu_id, name=self.GPU_NAMES[gpu_id], mem_used=0, mem_total=total, mem_free=total, mem_util=rng.randint(0, 100), temperature=rng.randint(35, 85),
             ))
         for job in self._jobs:
             if job["gpu"] is None:
@@ -543,23 +555,27 @@ class DemoMonitor(Monitor):
             used = min(sum(p.mem for p in gpu.procs), gpu.mem_total)
             gpu.mem_used = used
             gpu.mem_free = gpu.mem_total - used
-        self._assign_numbers(gpus)
-        self._annotate_eta([p for g in gpus for p in g.procs])
-        return gpus
+        gpu_procs = [p for g in gpus for p in g.procs]
+        self._assign_numbers(gpu_procs)
+        self._annotate_eta(gpu_procs)
 
-    def collect_pending(self, gpu_pids: set) -> List[ProcInfo]:
+        return gpus, gpu_procs
+
+    def collect_CPU(self, gpu_pids: set) -> CPUInfo:
         """The watched user's CPU-only (never-on-GPU) reporting jobs."""
         self._ensure_jobs()
         assert self._jobs is not None
-        user = self.watch_user or "frank"
-        pending = [
+        user = self.focus_user or "frank"
+        cpu_procs = [
             self._job_proc(job) for job in self._jobs
             if job["gpu"] is None and job["user"] == user
         ]
-        synthetic = GPUInfo(-1, "CPU", 0, 0, 0, -1, -1, procs=pending)
-        self._assign_numbers([synthetic])
-        self._annotate_eta(pending)
-        return pending
+        cpu = CPUInfo(name="CPU")
+        cpu.procs = cpu_procs
+        self._assign_numbers(cpu_procs)
+        self._annotate_eta(cpu_procs)
+
+        return cpu
 
 
 def _decode(value) -> str:

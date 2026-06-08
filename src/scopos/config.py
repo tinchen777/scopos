@@ -120,7 +120,7 @@ USER_PALETTE: List[str] = [
 ]
 
 # Colour reserved for the watched user (-u/--user) so they stand out.
-WATCH_USER_COLOR = "bright_blue"
+FOCUS_USER_COLOR = "bright_blue"
 
 # Progress bars.
 PROGRESS_WIDTH = 14            # Width, in cells, of a rendered progress bar inside a table cell.
