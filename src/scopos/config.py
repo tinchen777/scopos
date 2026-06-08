@@ -141,6 +141,11 @@ MEM_FREE_CRIT = 0.15           # below this -> COLOR_CRIT
 SYS_MEM_WARN = 0.6             # at/above this -> COLOR_WARN
 SYS_MEM_CRIT = 0.85            # at/above this -> COLOR_CRIT
 
+# Host RAM / swap meter bar sizing (it shrinks to fit a narrow terminal).
+SYS_BAR_MAX = 26               # widest the meter bar gets on a roomy terminal
+SYS_BAR_MIN = 4                # narrowest bar before trailing text is dropped
+SYS_METER_MIN = 10             # smallest meter ever drawn (label + a tiny bar)
+
 # GPU temperature.
 TEMP_WARN_C = 80               # at/above this -> COLOR_CRIT
 TEMP_COLOR = "cyan"            # normal temperature colour
@@ -193,6 +198,7 @@ def _apply_overrides(data: dict) -> None:
         "WATCH_USER_COLOR", "PROGRESS_COLOR", "BAR_TRACK_COLOR",
         "COLOR_OK", "COLOR_WARN", "COLOR_CRIT",
         "MEM_FREE_WARN", "MEM_FREE_CRIT", "SYS_MEM_WARN", "SYS_MEM_CRIT",
+        "SYS_BAR_MAX", "SYS_BAR_MIN", "SYS_METER_MIN",
         "TEMP_WARN_C", "TEMP_COLOR",
     ):
         take_scalar(name)

@@ -2,6 +2,7 @@
 """The Scopos Textual application."""
 
 from __future__ import annotations
+import time
 from rich.text import Text
 from textual.app import (App, ComposeResult)
 from textual.containers import (Container, Horizontal, VerticalScroll)
@@ -10,7 +11,7 @@ from typing import (Dict, List, Optional)
 
 from . import config
 from .monitor import (GPUInfo, Monitor, DemoMonitor)
-from .widgets.grid import GpuCard
+from .widgets.grid import (GpuCard, CpuCard)
 from .widgets.others import (Clock, Logo, SysMeter)
 
 
@@ -103,8 +104,8 @@ class ScoposApp(App):
         # When armed, the right-click menu offers "Kill"; off by default.
         self.danger = False
         self._cards: Dict[int, GpuCard] = {}
-        # The optional PENDING card (reported-but-not-yet-on-GPU processes).
-        self._pending_card: Optional[GpuCard] = None
+        # The resident CPU card (watched user's non-GPU scopos-reporting procs).
+        self._pending_card: Optional[CpuCard] = None
         self._frame: int = 0
         self.theme = theme
 
@@ -138,6 +139,11 @@ class ScoposApp(App):
 
     def on_resize(self):
         self._relayout_columns()
+        # The host meter shrinks its bars/text to fit the new width.
+        try:
+            self.query_one(SysMeter).refresh_stats()
+        except Exception:
+            pass
 
     # -- layout ------------------------------------------------------------
     def _relayout_columns(self):
@@ -184,6 +190,12 @@ class ScoposApp(App):
                 Text(f"collection error: {exc}", style="red")
             )
             return
+        # Timestamp the data so the clock shows when it was actually collected
+        # (and so it moves when you press 'r'), not free-running wall time.
+        try:
+            self.query_one(Clock).show_time(time.time())
+        except Exception:
+            pass
         self._sync_cards(gpus)
         for card in self._cards.values():
             card.set_zen(self.zen)
@@ -228,7 +240,7 @@ class ScoposApp(App):
         except Exception:
             pending = []
         if self._pending_card is None:
-            card = GpuCard(self.monitor, zen=True, pending=True, danger=self.danger)
+            card = CpuCard(self.monitor, zen=True, danger=self.danger)
             self._pending_card = card
             grid = self.query_one("#grid")
             if self._cards:

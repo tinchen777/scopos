@@ -154,7 +154,7 @@ class _Column:
         key: str,
         label: str,
         sort: Optional[Callable],
-        render: Callable[["GpuCard", ProcInfo], Any],
+        render: Callable[["Card", ProcInfo], Any],
         meta_key: Optional[str] = None,
         width: Optional[int] = None,
     ):
@@ -166,7 +166,7 @@ class _Column:
         self.width = width
 
 
-def _user_cell(card: "GpuCard", p: ProcInfo) -> Text:
+def _user_cell(card: "Card", p: ProcInfo) -> Text:
     return Text(f"● {p.user}", style=card.monitor.color_for(p.user))
 
 
@@ -243,12 +243,25 @@ def _meta_sort_value(value: Any):
         return (1, str(value).lower())
 
 
-class GpuCard(Vertical):
-    """One GPU: header, stats line, proportion bar, legend and process table."""
+class Card(Vertical):
+    """Base card: a header, a stats line and a process table.
+
+    All of the shared behaviour lives here — sorting, progress animation, hover
+    tooltips and the right-click copy/kill menu, plus the generic metadata-style
+    table layout.  Subclasses fill in the small differences:
+
+    * :class:`GpuCard` — one physical GPU; adds a memory bar + per-user legend,
+      shows every column in normal mode and the metadata layout in zen mode.
+    * :class:`CpuCard` — the watched user's non-GPU, scopos-reporting processes;
+      a host-RAM view with no GPU memory column.
+
+    The two are parallel siblings (much like ``Monitor`` / ``DemoMonitor``).
+    """
 
     # Layout-driven bits (padding, max width/height) come from scopos.config.
+    # A ``Card`` type selector also matches the GpuCard/CpuCard subclasses.
     DEFAULT_CSS = f"""
-    GpuCard {{
+    Card {{
         height: auto;
         max-width: {config.CARD_MAX_WIDTH or '100%'};
         border: round $primary;
@@ -257,26 +270,22 @@ class GpuCard(Vertical):
         padding: {config.CARD_PADDING[0]} {config.CARD_PADDING[1]};
         margin: 0;
     }}
-    GpuCard .stats {{ height: 1; }}
-    GpuCard .legend {{ height: auto; color: $text-muted; }}
-    GpuCard DataTable {{
+    Card .stats {{ height: 1; }}
+    Card .legend {{ height: auto; color: $text-muted; }}
+    Card DataTable {{
         height: auto;
         max-height: {config.TABLE_MAX_HEIGHT};
         margin-top: 1;
     }}
     """
 
-    def __init__(self, monitor: Monitor, zen: bool = False, pending: bool = False, danger: bool = False):
+    def __init__(self, monitor: Monitor, zen: bool = False, danger: bool = False):
         super().__init__()
         self.monitor = monitor
         self.zen = zen
-        # ``pending`` cards list a user's reported-but-not-yet-on-GPU processes.
-        self.is_pending = pending
         # ``danger`` only changes what the right-click menu offers (adds Kill).
         self.danger = danger
         self.stats = Static(classes="stats")
-        self.bar = MemoryBar()
-        self.legend = Static(classes="legend")
         self.table = DataTable(
             zebra_stripes=True,
             cursor_type="row",
@@ -293,12 +302,15 @@ class GpuCard(Vertical):
         self._anim_cells: List[Tuple[int, int, Dict[str, Any]]] = []
         self._frame: int = 0
 
+    # -- composition -------------------------------------------------------
     def compose(self):
         yield self.stats
-        if not self.is_pending:
-            yield self.bar
-            yield self.legend
+        yield from self._extra_widgets()
         yield self.table
+
+    def _extra_widgets(self):
+        """Header widgets between the stats line and the table (GPU adds a bar)."""
+        return iter(())
 
     def on_mount(self):
         # Keep the table's tooltip in sync with the cell under the mouse so a
@@ -315,11 +327,12 @@ class GpuCard(Vertical):
         if self._gpu is not None and self.is_mounted:
             self._apply(self._gpu)
 
+    def set_danger(self, danger: bool):
+        """Danger mode only affects whether the menu offers Kill (no re-render)."""
+        self.danger = danger
+
     # -- sorting -----------------------------------------------------------
-    def on_data_table_header_selected(
-        self,
-        event: DataTable.HeaderSelected
-    ):
+    def on_data_table_header_selected(self, event: DataTable.HeaderSelected):
         event.stop()
         idx = event.column_index
         if idx >= len(self._columns):
@@ -364,102 +377,28 @@ class GpuCard(Vertical):
     def _apply(self, gpu: GPUInfo):
         self._deferred = None
         self._gpu = gpu
-        if self.is_pending:
-            self.border_title = " 🧮  <CPU>  ·  tracked process(es) from scopos API "
-            self._update_pending_stats(gpu)
-        else:
-            self.border_title = f" # {gpu.index}  <{gpu.name}> "
-            self._update_stats(gpu)
-            self._update_bar(gpu)
-            self._update_legend(gpu)
+        self._render_header(gpu)
         self._update_table(gpu)
 
-    def _update_pending_stats(self, gpu: GPUInfo):
-        rss_total = sum(p.rss for p in gpu.procs)
-        line = Text(no_wrap=True, overflow="ellipsis")
-        line.append(f"[PROC] {len(gpu.procs)}", style="bold")
-        line.append(f"    [RAM] {_fmt_gb(rss_total)} GB", style="bold")
-        line.append(f"  ·  host-memory view of {self.monitor.watch_user}'s scopos-reporting jobs", style="dim")
-        self.stats.update(line)
+    # -- header / columns / procs (subclass-specific) ----------------------
+    def _render_header(self, gpu: GPUInfo):
+        """Set the border title and stats line (and any header widgets)."""
+        raise NotImplementedError
 
-    def _update_stats(self, gpu: GPUInfo):
-        rate = gpu.idle_rate
-        if rate <= config.MEM_FREE_CRIT:
-            free_style = f"bold {config.COLOR_CRIT}"
-        elif rate <= config.MEM_FREE_WARN:
-            free_style = f"bold {config.COLOR_WARN}"
-        else:
-            free_style = f"bold {config.COLOR_OK}"
+    def _fixed_keys(self) -> Tuple[str, ...]:
+        """Built-in columns (besides metadata + COMMAND) for the zen layout."""
+        return ZEN_FIXED_KEYS
 
-        line = Text(no_wrap=True, overflow="ellipsis")
-        # PROC
-        line.append("[PROC] ", style="bold")
-        line.append(f"{len(gpu.procs)}    ", style="bold")
-        # USED
-        line.append("[USED] ", style="bold")
-        line.append(f"{_fmt_gb(gpu.mem_used)}", style="bold")
-        line.append(f" / {_fmt_gb(gpu.mem_total)} GB", style="dim")
-        line.append(f" ({gpu.used_rate * 100:.0f}%)    ")
-        # FREE
-        line.append("[FREE] ", style="bold")
-        line.append(f"{_fmt_gb(gpu.mem_free)} GB ", style=free_style)
-        # ⚡
-        if gpu.util >= 0:
-            line.append("   [⚡] ", style="bold")
-            line.append(f"{gpu.util}%", style=config.TEMP_COLOR)
-        # 🌡
-        if gpu.temperature >= 0:
-            line.append("   [🌡] ", style="bold")
-            temp_style = config.COLOR_CRIT if gpu.temperature >= config.TEMP_WARN_C else config.TEMP_COLOR
-            line.append(f"{gpu.temperature}°C", style=temp_style)
-        self.stats.update(line)
-
-    def _update_bar(self, gpu: GPUInfo):
-        ordered = sorted(gpu.user_mems.items(), key=lambda kv: kv[1], reverse=True)
-        segments = [(self.monitor.color_for(u), float(m)) for u, m in ordered]
-        self.bar.set_data(segments, float(gpu.mem_total))
-
-    def _update_legend(self, gpu: GPUInfo):
-        ordered = sorted(gpu.user_mems.items(), key=lambda kv: kv[1], reverse=True)
-        legend = Text(no_wrap=True, overflow="ellipsis")
-        if not ordered:
-            legend.append("idle", style="dim")
-            self.legend.update(legend)
-            return
-        mvp = ordered[0][0]
-        watch = self.monitor.watch_user
-        for user, mem in ordered:
-            color = self.monitor.color_for(user)
-            pct = mem / gpu.mem_total * 100 if gpu.mem_total else 0
-            # In zen mode the watched user is highlighted in the legend even
-            # though the table is filtered down to just their processes.
-            legend.append("🏆 " if user == mvp else "")
-            if self.zen and bool(watch) and user == watch:
-                # zen mode
-                legend.append("★ ", style=color)
-                legend.append(user, style=f"bold underline {color}")
-            else:
-                # normal mode
-                legend.append(f"● {user}", style=color)
-            legend.append(f" {_fmt_gb(mem)} GB ({pct:.0f}%)   ")
-        self.legend.update(legend)
-
-    # -- table helpers -----------------------------------------------------
     def _visible_procs(self, gpu: GPUInfo) -> List[ProcInfo]:
-        """Processes to list in the table: filtered to the watched user in zen."""
-        if not self.is_pending and self.zen and self.monitor.watch_user:
-            return [p for p in gpu.procs if p.user == self.monitor.watch_user]
         return list(gpu.procs)
 
+    def _empty_message(self) -> str:
+        return "— no compute processes —"
+
     def _columns_for(self, procs: List[ProcInfo]) -> List[_Column]:
-        # CPU cards are metadata-centric, so they always use the zen-style layout.
-        if not self.zen and not self.is_pending:
-            return NORMAL_COLUMNS or [COLS["PID"]]
-        # The CPU card has no GPU memory column; zen GPU cards do.
-        fixed_keys = CPU_FIXED_KEYS if self.is_pending else ZEN_FIXED_KEYS
-        fixed = [COLS[k] for k in fixed_keys if _visible(k)]
-        # Build one column per reported field, in first-seen order across the
-        # visible processes, then keep COMMAND last.
+        # Metadata-centric layout: fixed columns + one column per reported field
+        # (first-seen order across the visible processes) + COMMAND last.
+        fixed = [COLS[k] for k in self._fixed_keys() if _visible(k)]
         meta_keys: List[str] = []
         for proc in procs:
             for key in proc.meta:
@@ -470,7 +409,7 @@ class GpuCard(Vertical):
         return cols or [COLS["PID"]]  # never leave the table column-less
 
     def _meta_column(self, key: str) -> _Column:
-        def render(card: "GpuCard", proc: ProcInfo, _key: str = key) -> Any:
+        def render(card: "Card", proc: ProcInfo, _key: str = key) -> Any:
             value = proc.meta.get(_key)
             if value is None:
                 return Text("")
@@ -488,7 +427,7 @@ class GpuCard(Vertical):
 
     def _update_table(self, gpu: GPUInfo):
         # Rebuild columns each time so the sort arrow can move between headers
-        # and zen-mode metadata columns can appear/disappear with the data.
+        # and metadata columns can appear/disappear with the data.
         self.table.clear(columns=True)
         self._anim_cells = []
 
@@ -501,7 +440,6 @@ class GpuCard(Vertical):
             for col in columns:
                 label = col.label
                 if col.key == self._sort_key:
-                    # label = f"{label} {'▼' if self._sort_reverse else '▲'}"
                     label = label if col.width is None else label.center(col.width)
                     label = Text(label, style="reverse" if self._sort_reverse else "reverse underline")
                     if col.sort is not None:
@@ -520,20 +458,10 @@ class GpuCard(Vertical):
                 self.table.add_row(*row)
         else:
             self._row_procs = []
-            self.table.add_columns("")  # at least one column is needed to show the "no processes" message
-            if self.is_pending:
-                msg = "— no scopos-reporting processes —"
-            elif self.zen and self.monitor.watch_user:
-                msg = f"— no processes for [{self.monitor.watch_user}] —"
-            else:
-                msg = "— no compute processes —"
-            self.table.add_row(Text(msg, style="dim"))
+            self.table.add_columns("")  # at least one column is needed to show the message
+            self.table.add_row(Text(self._empty_message(), style="dim"))
 
     # -- interaction: hover, right-click menu, kill ------------------------
-    def set_danger(self, danger: bool):
-        """Danger mode only affects whether the menu offers Kill (no re-render)."""
-        self.danger = danger
-
     def _hover_changed(self, coord: Optional[Coordinate]):
         """Show the full (untruncated) value of the hovered cell as a tooltip.
 
@@ -631,3 +559,125 @@ class GpuCard(Vertical):
             self.app.notify(message, severity="error" if error else "information")
         except Exception:
             pass
+
+
+class GpuCard(Card):
+    """One GPU: header, stats line, proportion bar, legend and process table."""
+
+    def __init__(self, monitor: Monitor, zen: bool = False, danger: bool = False):
+        super().__init__(monitor, zen=zen, danger=danger)
+        self.bar = MemoryBar()
+        self.legend = Static(classes="legend")
+
+    def _extra_widgets(self):
+        yield self.bar
+        yield self.legend
+
+    def _render_header(self, gpu: GPUInfo):
+        self.border_title = f" # {gpu.index}  <{gpu.name}> "
+        self._update_stats(gpu)
+        self._update_bar(gpu)
+        self._update_legend(gpu)
+
+    # Normal mode shows every column; zen mode uses the metadata layout (base).
+    def _columns_for(self, procs: List[ProcInfo]) -> List[_Column]:
+        if not self.zen:
+            return NORMAL_COLUMNS or [COLS["PID"]]
+        return super()._columns_for(procs)
+
+    def _visible_procs(self, gpu: GPUInfo) -> List[ProcInfo]:
+        """In zen mode the table is filtered down to the watched user."""
+        if self.zen and self.monitor.watch_user:
+            return [p for p in gpu.procs if p.user == self.monitor.watch_user]
+        return list(gpu.procs)
+
+    def _empty_message(self) -> str:
+        if self.zen and self.monitor.watch_user:
+            return f"— no processes for [{self.monitor.watch_user}] —"
+        return "— no compute processes —"
+
+    def _update_stats(self, gpu: GPUInfo):
+        rate = gpu.idle_rate
+        if rate <= config.MEM_FREE_CRIT:
+            free_style = f"bold {config.COLOR_CRIT}"
+        elif rate <= config.MEM_FREE_WARN:
+            free_style = f"bold {config.COLOR_WARN}"
+        else:
+            free_style = f"bold {config.COLOR_OK}"
+
+        line = Text(no_wrap=True, overflow="ellipsis")
+        # PROC
+        line.append("[PROC] ", style="bold")
+        line.append(f"{len(gpu.procs)}    ", style="bold")
+        # USED
+        line.append("[USED] ", style="bold")
+        line.append(f"{_fmt_gb(gpu.mem_used)}", style="bold")
+        line.append(f" / {_fmt_gb(gpu.mem_total)} GB", style="dim")
+        line.append(f" ({gpu.used_rate * 100:.0f}%)    ")
+        # FREE
+        line.append("[FREE] ", style="bold")
+        line.append(f"{_fmt_gb(gpu.mem_free)} GB ", style=free_style)
+        # ⚡
+        if gpu.util >= 0:
+            line.append("   [⚡] ", style="bold")
+            line.append(f"{gpu.util}%", style=config.TEMP_COLOR)
+        # 🌡
+        if gpu.temperature >= 0:
+            line.append("   [🌡] ", style="bold")
+            temp_style = config.COLOR_CRIT if gpu.temperature >= config.TEMP_WARN_C else config.TEMP_COLOR
+            line.append(f"{gpu.temperature}°C", style=temp_style)
+        self.stats.update(line)
+
+    def _update_bar(self, gpu: GPUInfo):
+        ordered = sorted(gpu.user_mems.items(), key=lambda kv: kv[1], reverse=True)
+        segments = [(self.monitor.color_for(u), float(m)) for u, m in ordered]
+        self.bar.set_data(segments, float(gpu.mem_total))
+
+    def _update_legend(self, gpu: GPUInfo):
+        ordered = sorted(gpu.user_mems.items(), key=lambda kv: kv[1], reverse=True)
+        legend = Text(no_wrap=True, overflow="ellipsis")
+        if not ordered:
+            legend.append("idle", style="dim")
+            self.legend.update(legend)
+            return
+        mvp = ordered[0][0]
+        watch = self.monitor.watch_user
+        for user, mem in ordered:
+            color = self.monitor.color_for(user)
+            pct = mem / gpu.mem_total * 100 if gpu.mem_total else 0
+            # In zen mode the watched user is highlighted in the legend even
+            # though the table is filtered down to just their processes.
+            legend.append("🏆 " if user == mvp else "")
+            if self.zen and bool(watch) and user == watch:
+                # zen mode
+                legend.append("★ ", style=color)
+                legend.append(user, style=f"bold underline {color}")
+            else:
+                # normal mode
+                legend.append(f"● {user}", style=color)
+            legend.append(f" {_fmt_gb(mem)} GB ({pct:.0f}%)   ")
+        self.legend.update(legend)
+
+
+class CpuCard(Card):
+    """The watched user's non-GPU, scopos-reporting processes (host-RAM view).
+
+    Parallel to :class:`GpuCard` but with no GPU memory column and no bar/legend;
+    it extends scopos to plain CPU jobs and to jobs not yet on a GPU. A job that
+    later allocates GPU memory shows up under its GPU card automatically.
+    """
+
+    def _render_header(self, gpu: GPUInfo):
+        self.border_title = " 🧮  <CPU>  ·  tracked process(es) from scopos API "
+        rss_total = sum(p.rss for p in gpu.procs)
+        line = Text(no_wrap=True, overflow="ellipsis")
+        line.append(f"[PROC] {len(gpu.procs)}", style="bold")
+        line.append(f"    [RAM] {_fmt_gb(rss_total)} GB", style="bold")
+        line.append(f"  ·  host-memory view of {self.monitor.watch_user}'s scopos-reporting jobs", style="dim")
+        self.stats.update(line)
+
+    def _fixed_keys(self) -> Tuple[str, ...]:
+        return CPU_FIXED_KEYS
+
+    def _empty_message(self) -> str:
+        return "— no scopos-reporting processes —"
