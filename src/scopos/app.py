@@ -10,7 +10,7 @@ from typing import (Dict, List, Optional)
 
 from . import config
 from .monitor import (GPUInfo, Monitor, DemoMonitor)
-from .widgets.grid import GpuCard
+from .widgets.grid import (GpuCard, CpuCard)
 from .widgets.others import (Clock, Logo, SysMeter)
 
 
@@ -103,8 +103,8 @@ class ScoposApp(App):
         # When armed, the right-click menu offers "Kill"; off by default.
         self.danger = False
         self._cards: Dict[int, GpuCard] = {}
-        # The optional PENDING card (reported-but-not-yet-on-GPU processes).
-        self._pending_card: Optional[GpuCard] = None
+        # The resident CPU card (watched user's non-GPU scopos-reporting procs).
+        self._pending_card: Optional[CpuCard] = None
         self._frame: int = 0
         self.theme = theme
 
@@ -138,6 +138,11 @@ class ScoposApp(App):
 
     def on_resize(self):
         self._relayout_columns()
+        # The host meter shrinks its bars/text to fit the new width.
+        try:
+            self.query_one(SysMeter).refresh_stats()
+        except Exception:
+            pass
 
     # -- layout ------------------------------------------------------------
     def _relayout_columns(self):
@@ -228,7 +233,7 @@ class ScoposApp(App):
         except Exception:
             pending = []
         if self._pending_card is None:
-            card = GpuCard(self.monitor, zen=True, pending=True, danger=self.danger)
+            card = CpuCard(self.monitor, zen=True, danger=self.danger)
             self._pending_card = card
             grid = self.query_one("#grid")
             if self._cards:

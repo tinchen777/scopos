@@ -38,7 +38,9 @@ class SysMeter(Static):
     }
     """
 
-    BAR_WIDTH = 26
+    BAR_MAX = 26          # widest the bar gets on a roomy terminal
+    BAR_MIN = 4           # narrowest before we start dropping the trailing text
+    TOTAL_MIN = 10        # smallest meter we'll ever draw (label + tiny bar)
 
     def __init__(self, monitor: Monitor):
         super().__init__()
@@ -46,17 +48,46 @@ class SysMeter(Static):
 
     def on_mount(self):
         self.refresh_stats()
+        # Re-render once layout has settled (sibling sizes are known by then).
+        self.call_after_refresh(self.refresh_stats)
         self.set_interval(2.0, self.refresh_stats)
 
     def refresh_stats(self):
         stats = self.monitor.system_stats()
+        budget = self._budget()
         text = Text(justify="right")
-        text.append(self._line("Mem", *stats["mem"]))
+        text.append(self._line("Mem", *stats["mem"], budget=budget))
         text.append("\n")
-        text.append(self._line("Swp", *stats["swap"]))
+        text.append(self._line("Swp", *stats["swap"], budget=budget))
         self.update(text)
 
-    def _line(self, label: str, used: float, total: float) -> Text:
+    def _budget(self) -> int:
+        """Cells available to a meter line, shrinking with the terminal.
+
+        The top bar holds the logo and clock at their natural widths and lets
+        flexible spacers absorb the rest, so the meter must fit whatever is
+        left — otherwise it gets clipped and can't be read (the bug this fixes).
+        """
+        full = self._full_width()
+        try:
+            total = self.app.size.width
+            used = 0
+            for widget in (Logo, Clock):
+                try:
+                    used += self.app.query_one(widget).region.width
+                except Exception:
+                    pass
+            # Leave a little room for the top-bar padding / breathing space.
+            avail = total - used - 6 if used else full
+        except Exception:
+            avail = full
+        return max(self.TOTAL_MIN, min(full, avail))
+
+    def _full_width(self) -> int:
+        # Widest meter: "Mem " + ▕bar▏ + " 1234.5 / 1234.5 GB" + " 100%".
+        return 4 + 1 + self.BAR_MAX + 1 + 19 + 5
+
+    def _line(self, label: str, used: float, total: float, budget: int) -> Text:
         total = total or 1
         frac = max(0.0, min(1.0, used / total))
         if frac >= config.SYS_MEM_CRIT:
@@ -65,16 +96,34 @@ class SysMeter(Static):
             color = config.COLOR_WARN
         else:
             color = config.COLOR_OK
-        filled = round(frac * self.BAR_WIDTH)
         gb = 1024 ** 3
+        prefix = f"{label} "
+        # Fixed-width so the two lines (Mem / Swp) always line up.
+        gb_txt = f" {used / gb:5.1f} / {total / gb:5.1f} GB"
+        pct_txt = f" {frac * 100:3.0f}%"
+        ends = 2  # the ▕ ▏ bar caps
+
+        # Largest-first: try bar + both texts, then drop GB, then drop the
+        # percentage, shrinking the bar toward BAR_MIN as space runs out.
+        show_gb = show_pct = True
+        for show_gb, show_pct in ((True, True), (False, True), (False, False)):
+            suffix = (len(gb_txt) if show_gb else 0) + (len(pct_txt) if show_pct else 0)
+            bar = budget - len(prefix) - ends - suffix
+            if bar >= self.BAR_MIN:
+                break
+        bar = max(1, min(self.BAR_MAX, bar))
+        filled = round(frac * bar)
+
         line = Text()
-        line.append(f"{label} ", style="bold")
+        line.append(prefix, style="bold")
         line.append("▕", style="grey50")
         line.append("█" * filled, style=color)
-        line.append("░" * (self.BAR_WIDTH - filled), style=config.BAR_TRACK_COLOR)
+        line.append("░" * (bar - filled), style=config.BAR_TRACK_COLOR)
         line.append("▏", style="grey50")
-        line.append(f" {used / gb:5.1f} / {total / gb:5.1f} GB", style="dim")
-        line.append(f" {frac * 100:3.0f}%", style=color)
+        if show_gb:
+            line.append(gb_txt, style="dim")
+        if show_pct:
+            line.append(pct_txt, style=color)
         return line
 
 
