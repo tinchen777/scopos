@@ -10,12 +10,26 @@ from textual.containers import (Container, Horizontal, VerticalScroll)
 from textual.widgets import (Footer, Static)
 from typing import (Dict, List, Optional)
 
+from textual.widgets import (ContentSwitcher, Tab, Tabs)
+
 from . import config
 from .monitor import (CPUInfo, GPUInfo, Monitor, DemoMonitor)
 from .widgets.grid import (GpuCard, CpuCard)
 from .widgets.others import (Clock, Logo, SysMeter)
+from .widgets.views import (InfoView, TmuxView)
 
-VALID_MODES = ("global", "zen", "tmux")
+# The tabs / modes, in cycle order. The first three are layouts over the same
+# device grid; "info" is a static page. ``info`` is treated as a mode here only
+# so the tab bar and the data dispatch share one source of truth.
+TABS = ("global", "zen", "tmux", "info")
+TAB_LABELS = {"global": "Global", "zen": "Zen", "tmux": "Tmux", "info": "Info"}
+VALID_MODES = TABS
+
+
+def _view_for(mode: str) -> str:
+    """Which ContentSwitcher panel a mode shows (global & zen share the grid)."""
+    return {"global": "view-grid", "zen": "view-grid",
+            "tmux": "view-tmux", "info": "view-info"}[mode]
 
 
 class ScoposApp(App):
@@ -71,7 +85,13 @@ class ScoposApp(App):
         height: auto;
         padding: {config.GRID_PADDING[0]} {config.GRID_PADDING[1]};
     }}
-    #body {{
+    #tabs {{
+        height: auto;
+    }}
+    #switcher {{
+        height: 1fr;
+    }}
+    #switcher > VerticalScroll {{
         height: 1fr;
     }}
     #status {{
@@ -91,6 +111,7 @@ class ScoposApp(App):
         Binding("g", "global_mode", show=False),
         Binding("z", "zen_mode", show=False),
         Binding("t", "tmux_mode", show=False),
+        Binding("i", "info", show=False),
         ("d", "toggle_dark", "Light/Dark"),
         # Deliberately awkward so it isn't hit by accident: it arms right-click
         # process killing. Confirmed again per-kill by a dialog.
@@ -111,6 +132,8 @@ class ScoposApp(App):
 
         self._gpu_cards: Dict[int, GpuCard] = {}
         self._cpu_card: Optional[CpuCard] = None
+        self._tmux_view = TmuxView(self.monitor, danger=self.danger)
+        self._info_view = InfoView(self.monitor)
         self._frame: int = 0
         self.theme = theme
 
@@ -121,13 +144,20 @@ class ScoposApp(App):
             yield Clock()
             yield Static(id="spacer2")
             yield SysMeter(self.interval)
-        with VerticalScroll(id="body"):
-            yield Container(id="grid")
+        yield Tabs(*(Tab(TAB_LABELS[m], id=f"tab-{m}") for m in TABS), id="tabs")
+        with ContentSwitcher(initial=_view_for(self.mode), id="switcher"):
+            with VerticalScroll(id="view-grid"):
+                yield Container(id="grid")
+            with VerticalScroll(id="view-tmux"):
+                yield self._tmux_view
+            with VerticalScroll(id="view-info"):
+                yield self._info_view
         yield Static(id="status")
         yield Footer()
 
     def on_mount(self):
-        self.refresh_data()
+        # Selecting the tab fires TabActivated, which sets the view and refreshes.
+        self.query_one(Tabs).active = f"tab-{self.mode}"
         self.set_interval(self.interval, self.refresh_data)
         # A faster, lightweight tick that only animates indeterminate progress
         # bars (it updates just those cells, not the whole table).
@@ -168,31 +198,33 @@ class ScoposApp(App):
     def action_refresh(self):
         self.refresh_data()
 
-    def _toggle_mode(self, mode: str):
-        self.mode = mode
-        self.refresh_data()
-        self.notify(
-            f"Switch to {mode.capitalize()} mode",
-            title=mode.upper(),
-            severity="information",
-            timeout=3,
-        )
+    def _activate(self, mode: str):
+        """Select a tab; the TabActivated handler does the real switching."""
+        self.query_one(Tabs).active = f"tab-{mode}"
 
     def action_global_mode(self):
-        """Switch to the `global` layout."""
-        self._toggle_mode("global")
+        self._activate("global")
 
     def action_zen_mode(self):
-        """Switch to the `zen` layout."""
-        self._toggle_mode("zen")
+        self._activate("zen")
 
     def action_tmux_mode(self):
-        """Switch to the `tmux` layout."""
-        self._toggle_mode("tmux")
+        self._activate("tmux")
+
+    def action_info(self):
+        self._activate("info")
 
     def action_mode(self):
-        """Switch between `global`, `zen`, and `tmux` layouts."""
-        self._toggle_mode(self._next_mode())
+        """Cycle global → zen → tmux → info."""
+        self._activate(self._next_mode())
+
+    def on_tabs_tab_activated(self, event: Tabs.TabActivated):
+        mode = (event.tab.id or "").removeprefix("tab-")
+        if mode not in TABS:
+            return
+        self.mode = mode
+        self.query_one("#switcher", ContentSwitcher).current = _view_for(mode)
+        self.refresh_data()
 
     def action_toggle_danger(self):
         """Arm/disarm right-click process killing (still confirmed per-kill)."""
@@ -208,15 +240,22 @@ class ScoposApp(App):
 
     # -- data --------------------------------------------------------------
     def refresh_data(self):
-        # refresh time
+        # The on-screen time reflects when this data was collected.
         try:
             self.query_one(Clock).show_time(time.time())
         except Exception:
             pass
-        # refresh gpus
+        # Only refresh whatever the active tab is showing.
+        if self.mode in ("global", "zen"):
+            self._refresh_grid()
+        elif self.mode == "tmux":
+            self._refresh_tmux()
+        elif self.mode == "info":
+            self._refresh_info()
+
+    def _refresh_grid(self):
         gpus, gpu_procs = self.monitor.collect_GPU()
         self._sync_gpu_cards(gpus)
-        # refresh cpu
         if self.mode == "zen":
             cpu = self.monitor.collect_CPU({p.pid for p in gpu_procs})
             self._sync_cpu_card(cpu)
@@ -227,12 +266,26 @@ class ScoposApp(App):
                 self._cpu_card = None
                 self.call_after_refresh(self._relayout_columns)
             n_cpu_procs = 0
-        # refresh status
-        self._update_status(
-            n_procs=len(gpu_procs) + n_cpu_procs,
-            n_users=sum(len(g.user_mems) for g in gpus),
-            n_gpus=len(gpus)
+        demo_tag = "demo" if self.demo else "live"
+        self._set_status(
+            f"{len(gpus)} GPU(s) · {len(gpu_procs) + n_cpu_procs} proc(s) · "
+            f"{sum(len(g.user_mems) for g in gpus)} user(s)  ·  refresh {self.interval}s  ·  "
+            f"{demo_tag}  ·  focus on [{self.monitor.focus_user}]"
         )
+
+    def _refresh_tmux(self):
+        sessions = self.monitor.collect_tmux()
+        self._tmux_view.set_danger(self.danger)
+        self._tmux_view.update(sessions)
+        n_proc = sum(len(s.all_procs) for s in sessions)
+        self._set_status(
+            f"tmux · {len(sessions)} session(s) · {n_proc} proc(s)  ·  "
+            f"focus on [{self.monitor.focus_user}]  ·  your own tmux server only"
+        )
+
+    def _refresh_info(self):
+        self._info_view.update()
+        self._set_status("info  ·  scopos & host overview")
 
     def _sync_gpu_cards(self, gpus: List[GPUInfo]):
         wanted = {g.id for g in gpus}
@@ -248,13 +301,13 @@ class ScoposApp(App):
                 self._gpu_cards[gpu.id] = gpu_card
                 grid.mount(gpu_card)
             self.call_after_refresh(self._relayout_columns)
-        else:
-            # GPU set is the same, just update the existing cards in-place for smoothness.
-            for card in self._gpu_cards.values():
-                card.set_zen(self.mode == "zen")
-                card.set_danger(self.danger)
-            for gpu in gpus:
-                self._gpu_cards[gpu.id].update(gpu)
+        # Sync mode/danger and push the latest data to every card. A freshly
+        # built card isn't mounted yet, so update() defers until on_mount.
+        for card in self._gpu_cards.values():
+            card.set_zen(self.mode == "zen")
+            card.set_danger(self.danger)
+        for gpu in gpus:
+            self._gpu_cards[gpu.id].update(gpu)
 
     def _sync_cpu_card(self, cpu: CPUInfo):
         """Keep the CPU card resident in zen mode (for the watched user).
@@ -274,13 +327,9 @@ class ScoposApp(App):
         self._cpu_card.set_danger(self.danger)
         self._cpu_card.update(cpu)
 
-    def _update_status(self, n_procs: int, n_users: int, n_gpus: int):
-        demo_tag = "demo" if self.demo else "live"
-        focus = f"focus on [{self.monitor.focus_user}]"
+    def _set_status(self, main: str):
         text = Text(
-            f"{n_gpus} GPU(s) · {n_procs} proc(s) · {n_users} user(s)"
-            f"  ·  refresh {self.interval}s  ·  {demo_tag}  ·  {focus}"
-            f"  ·  {self.mode}  ·  press m switch to {self._next_mode()} mode",
+            f"{main}  ·  {self.mode}  ·  press m for {self._next_mode()} mode",
             style="dim",
         )
         if self.danger:

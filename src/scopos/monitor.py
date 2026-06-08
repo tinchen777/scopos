@@ -100,6 +100,36 @@ class GPUInfo(DeviceInfo):
         return max(self.user_mems.items(), key=lambda kv: kv[1])[0]
 
 
+@dataclass
+class TmuxPane:
+    """One tmux pane and the process subtree running inside it.
+
+    ``procs`` is the pane's process subtree, shell first (``procs[0]`` is the
+    pane's shell, ``procs[1:]`` the commands running under it).
+    """
+
+    session: str
+    attached: bool
+    window_idx: int
+    window_name: str
+    pane_idx: int
+    pane_pid: int
+    procs: List[ProcInfo] = field(default_factory=list)
+
+
+@dataclass
+class TmuxSession:
+    """One tmux session: a name, attached flag and its panes."""
+
+    name: str
+    attached: bool
+    panes: List[TmuxPane] = field(default_factory=list)
+
+    @property
+    def all_procs(self) -> List[ProcInfo]:
+        return [p for pane in self.panes for p in pane.procs]
+
+
 def fmt_duration(seconds: int) -> str:
     """Format a time span with unit symbols, e.g. "2d 03h", "3h 20m", "45s"."""
     seconds = max(0, int(seconds))
@@ -423,6 +453,84 @@ class Monitor:
                 return node.pid, name
         return None
 
+    # -- info --------------------------------------------------------------
+    def gpu_specs(self) -> List[Tuple[int, str, int]]:
+        """Light GPU inventory (id, name, total bytes) without scanning procs."""
+        try:
+            self.start()
+            specs = []
+            for i in range(pn.nvmlDeviceGetCount()):
+                handle = pn.nvmlDeviceGetHandleByIndex(i)
+                name = _decode(pn.nvmlDeviceGetName(handle))
+                mem = pn.nvmlDeviceGetMemoryInfo(handle)
+                specs.append((i, name, int(mem.used + mem.free)))
+            return specs
+        except Exception:
+            return []
+
+    # -- tmux mode ---------------------------------------------------------
+    def collect_tmux(self) -> List[TmuxSession]:
+        """Snapshot the running user's tmux sessions, panes and processes.
+
+        Only the running user's tmux server is reachable (its socket lives in a
+        per-user directory), so this shows *your own* tmux. Returns ``[]`` when
+        tmux isn't installed or no server is running. (No GPU/NVML needed.)
+        """
+        self._tmux_panes = self._tmux_pane_map()
+        sep = "\t"
+        fmt = sep.join((
+            "#{session_name}", "#{session_attached}", "#{window_index}",
+            "#{window_name}", "#{pane_index}", "#{pane_pid}",
+        ))
+        try:
+            out = subprocess.run(
+                ["tmux", "list-panes", "-a", "-F", fmt],
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                timeout=2, check=False,
+            )
+        except Exception:
+            return []
+        sessions: Dict[str, TmuxSession] = {}
+        for line in out.stdout.decode("utf-8", "replace").splitlines():
+            parts = line.split(sep)
+            if len(parts) != 6:
+                continue
+            sname, attached, widx, wname, pidx, ppid = parts
+            try:
+                pane_pid = int(ppid)
+            except ValueError:
+                continue
+            is_attached = attached.strip() not in ("", "0")
+            session = sessions.get(sname)
+            if session is None:
+                session = TmuxSession(name=sname, attached=is_attached)
+                sessions[sname] = session
+            pane = TmuxPane(
+                session=sname, attached=is_attached,
+                window_idx=_to_int(widx), window_name=wname,
+                pane_idx=_to_int(pidx), pane_pid=pane_pid,
+                procs=self._pane_procs(pane_pid),
+            )
+            session.panes.append(pane)
+        all_procs = [p for s in sessions.values() for p in s.all_procs]
+        self._assign_numbers(all_procs)
+        self._annotate_eta(all_procs)
+        return list(sessions.values())
+
+    def _pane_procs(self, pane_pid: int) -> List[ProcInfo]:
+        """Build ProcInfo for a pane's process subtree, shell (pane_pid) first."""
+        try:
+            root = psutil.Process(pane_pid)
+            members = [root] + root.children(recursive=True)
+        except Exception:
+            return []
+        procs: List[ProcInfo] = []
+        for member in members:
+            proc = self._build_proc(_HostProc(member.pid))
+            if proc is not None:
+                procs.append(proc)
+        return procs
+
 
 class DemoMonitor(Monitor):
     """Synthetic monitor with a *stable, evolving* set of processes.
@@ -577,8 +685,59 @@ class DemoMonitor(Monitor):
 
         return cpu
 
+    def gpu_specs(self) -> List[Tuple[int, str, int]]:
+        return [(i, name, self.GPU_TOTAL_GB[i] * 1024 ** 3) for i, name in enumerate(self.GPU_NAMES)]
+
+    def collect_tmux(self) -> List[TmuxSession]:
+        """Fabricate a couple of tmux sessions so ``--demo`` shows tmux mode."""
+        self._ensure_jobs()
+        assert self._jobs is not None
+        # Reuse the synthetic jobs as the "commands" running inside panes.
+        jobs = list(self._jobs)
+        sessions: List[TmuxSession] = []
+        plan = [
+            ("main", True, [("0", "train"), ("1", "shell")]),
+            ("exp1", False, [("0", "eval")]),
+        ]
+        pane_pid = 4000
+        ji = 0
+        for sname, attached, windows in plan:
+            session = TmuxSession(name=sname, attached=attached)
+            for w_i, (widx, wname) in enumerate(windows):
+                shell = ProcInfo(
+                    pid=pane_pid, pname="zsh", user=self.focus_user, mem=0,
+                    runtime="1h 02m", cmd="-zsh", runtime_sec=3720,
+                    sid=pane_pid, sname=f"tmux:{sname}",
+                    s_start="-", s_start_ts=time.time() - 3720, rss=8 * 1024 ** 2,
+                )
+                procs = [shell]
+                # Put one synthetic job as the command running in this pane.
+                if jobs:
+                    job = jobs[ji % len(jobs)]
+                    ji += 1
+                    proc = self._job_proc(job)
+                    proc.sname = f"tmux:{sname}"
+                    procs.append(proc)
+                session.panes.append(TmuxPane(
+                    session=sname, attached=attached, window_idx=int(widx),
+                    window_name=wname, pane_idx=0, pane_pid=pane_pid, procs=procs,
+                ))
+                pane_pid += 1
+            sessions.append(session)
+        all_procs = [p for s in sessions for p in s.all_procs]
+        self._assign_numbers(all_procs)
+        self._annotate_eta(all_procs)
+        return sessions
+
 
 def _decode(value) -> str:
     if isinstance(value, bytes):
         return value.decode("utf-8", "replace")
     return str(value)
+
+
+def _to_int(value: str, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default

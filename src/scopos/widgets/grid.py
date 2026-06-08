@@ -259,9 +259,9 @@ class DeviceCard(Vertical):
     """
 
     # Layout-driven bits (padding, max width/height) come from scopos.config.
-    # A ``Card`` type selector also matches the GpuCard/CpuCard subclasses.
+    # A ``DeviceCard`` type selector also matches the GpuCard/CpuCard subclasses.
     DEFAULT_CSS = f"""
-    Card {{
+    DeviceCard {{
         height: auto;
         max-width: {config.CARD_MAX_WIDTH or '100%'};
         border: round $primary;
@@ -270,9 +270,9 @@ class DeviceCard(Vertical):
         padding: {config.CARD_PADDING[0]} {config.CARD_PADDING[1]};
         margin: 0;
     }}
-    Card .stats {{ height: 1; }}
-    Card .legend {{ height: auto; color: $text-muted; }}
-    Card DataTable {{
+    DeviceCard .stats {{ height: 1; }}
+    DeviceCard .legend {{ height: auto; color: $text-muted; }}
+    DeviceCard DataTable {{
         height: auto;
         max-height: {config.TABLE_MAX_HEIGHT};
         margin-top: 1;
