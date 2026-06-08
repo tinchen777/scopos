@@ -2,6 +2,7 @@
 """The Scopos Textual application."""
 
 from __future__ import annotations
+import time
 from rich.text import Text
 from textual.app import (App, ComposeResult)
 from textual.containers import (Container, Horizontal, VerticalScroll)
@@ -189,6 +190,12 @@ class ScoposApp(App):
                 Text(f"collection error: {exc}", style="red")
             )
             return
+        # Timestamp the data so the clock shows when it was actually collected
+        # (and so it moves when you press 'r'), not free-running wall time.
+        try:
+            self.query_one(Clock).show_time(time.time())
+        except Exception:
+            pass
         self._sync_cards(gpus)
         for card in self._cards.values():
             card.set_zen(self.zen)
