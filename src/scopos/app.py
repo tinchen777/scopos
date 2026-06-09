@@ -255,11 +255,6 @@ class ScoposApp(App):
 
     # -- data --------------------------------------------------------------
     def refresh_data(self):
-        # The on-screen time reflects when this data was collected.
-        try:
-            self.query_one(Clock).show_time(time.time())
-        except Exception:
-            pass
         # Only refresh whatever the active tab is showing.
         if self.mode in ("global", "zen"):
             self._refresh_grid()
@@ -267,6 +262,11 @@ class ScoposApp(App):
             self._refresh_tmux()
         elif self.mode == "info":
             self._refresh_info()
+        # The on-screen time reflects when this data was collected.
+        try:
+            self.query_one(Clock).show_time(time.time())
+        except Exception:
+            pass
 
     def _refresh_grid(self):
         gpus, gpu_procs = self.monitor.collect_GPU()
