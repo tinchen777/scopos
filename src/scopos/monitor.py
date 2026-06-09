@@ -476,7 +476,6 @@ class Monitor:
         per-user directory), so this shows *your own* tmux. Returns ``[]`` when
         tmux isn't installed or no server is running. (No GPU/NVML needed.)
         """
-        self._tmux_panes = self._tmux_pane_map()
         sep = "\t"
         fmt = sep.join((
             "#{session_name}", "#{session_attached}", "#{window_index}",
@@ -509,27 +508,65 @@ class Monitor:
                 session=sname, attached=is_attached,
                 window_idx=_to_int(widx), window_name=wname,
                 pane_idx=_to_int(pidx), pane_pid=pane_pid,
-                procs=self._pane_procs(pane_pid),
             )
+            pane.procs = self._pane_procs(pane)
             session.panes.append(pane)
         all_procs = [p for s in sessions.values() for p in s.all_procs]
         self._assign_numbers(all_procs)
         self._annotate_eta(all_procs)
         return list(sessions.values())
 
-    def _pane_procs(self, pane_pid: int) -> List[ProcInfo]:
-        """Build ProcInfo for a pane's process subtree, shell (pane_pid) first."""
+    def _pane_procs(self, pane: TmuxPane) -> List[ProcInfo]:
+        """A pane's shell (``procs[0]``) plus its *direct* children (the running
+        programs).  Only depth-1 children are walked — cheap, and enough to show
+        what's actually running — and we skip the parent-chain/tmux resolution
+        in ``_build_proc`` since the session is already known here.
+        """
         try:
-            root = psutil.Process(pane_pid)
-            members = [root] + root.children(recursive=True)
+            root = psutil.Process(pane.pane_pid)
+            members = [root] + root.children(recursive=False)
+            s_start_ts = root.create_time()
         except Exception:
             return []
+        sname = f"{pane.session}:{pane.window_idx}.{pane.pane_idx}"
         procs: List[ProcInfo] = []
         for member in members:
-            proc = self._build_proc(_HostProc(member.pid))
+            proc = self._build_tmux_proc(member, pane.pane_pid, sname, s_start_ts)
             if proc is not None:
                 procs.append(proc)
         return procs
+
+    def _build_tmux_proc(self, p, sid: int, sname: str, s_start_ts: float) -> Optional[ProcInfo]:
+        """A fast ProcInfo for a tmux process: session is known, so no chain walk."""
+        try:
+            pid = p.pid
+            with p.oneshot():
+                name = p.name()
+                try:
+                    user = p.username()
+                except Exception:
+                    user = "?"
+                try:
+                    cmd = " ".join(p.cmdline()).strip()
+                except Exception:
+                    cmd = name
+                try:
+                    runtime_sec = int(time.time() - p.create_time())
+                except Exception:
+                    runtime_sec = 0
+                try:
+                    rss = int(p.memory_info().rss)
+                except Exception:
+                    rss = 0
+        except Exception:
+            return None
+        self.color_for(user)
+        s_start = time.strftime("%y-%m-%d %H:%M:%S", time.localtime(s_start_ts))
+        return ProcInfo(
+            pid=pid, pname=name, user=user, mem=0, runtime=fmt_duration(runtime_sec),
+            cmd=cmd or name, runtime_sec=runtime_sec, sid=sid, sname=sname,
+            s_start=s_start, s_start_ts=s_start_ts, rss=rss, meta=read_fields(pid),
+        )
 
 
 class DemoMonitor(Monitor):
@@ -692,34 +729,33 @@ class DemoMonitor(Monitor):
         """Fabricate a couple of tmux sessions so ``--demo`` shows tmux mode."""
         self._ensure_jobs()
         assert self._jobs is not None
-        # Reuse the synthetic jobs as the "commands" running inside panes.
         jobs = list(self._jobs)
         sessions: List[TmuxSession] = []
+        # (session, attached, [(win_idx, win_name, has_program)])
         plan = [
-            ("main", True, [("0", "train"), ("1", "shell")]),
-            ("exp1", False, [("0", "eval")]),
+            ("main", True, [(0, "train", True), (1, "shell", False)]),
+            ("exp1", False, [(0, "eval", True)]),
         ]
         pane_pid = 4000
         ji = 0
         for sname, attached, windows in plan:
             session = TmuxSession(name=sname, attached=attached)
-            for w_i, (widx, wname) in enumerate(windows):
+            for widx, wname, has_program in windows:
+                pane_sname = f"{sname}:{widx}.0"
                 shell = ProcInfo(
                     pid=pane_pid, pname="zsh", user=self.focus_user, mem=0,
                     runtime="1h 02m", cmd="-zsh", runtime_sec=3720,
-                    sid=pane_pid, sname=f"tmux:{sname}",
+                    sid=pane_pid, sname=pane_sname,
                     s_start="-", s_start_ts=time.time() - 3720, rss=8 * 1024 ** 2,
                 )
                 procs = [shell]
-                # Put one synthetic job as the command running in this pane.
-                if jobs:
-                    job = jobs[ji % len(jobs)]
+                if has_program and jobs:
+                    proc = self._job_proc(jobs[ji % len(jobs)])
                     ji += 1
-                    proc = self._job_proc(job)
-                    proc.sname = f"tmux:{sname}"
+                    proc.sname = pane_sname
                     procs.append(proc)
                 session.panes.append(TmuxPane(
-                    session=sname, attached=attached, window_idx=int(widx),
+                    session=sname, attached=attached, window_idx=widx,
                     window_name=wname, pane_idx=0, pane_pid=pane_pid, procs=procs,
                 ))
                 pane_pid += 1

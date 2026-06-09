@@ -240,23 +240,336 @@ def _meta_sort_value(value: Any):
         return (1, str(value).lower())
 
 
-class DeviceCard(Vertical):
-    """Base card: a header, a stats line and a process table.
+def _clip(text: str, width: int) -> str:
+    return text if len(text) <= width else text[: max(1, width - 1)] + "…"
 
-    All of the shared behaviour lives here — sorting, progress animation, hover
-    tooltips and the right-click copy/kill menu, plus the generic metadata-style
-    table layout.  Subclasses fill in the small differences:
 
-    * :class:`GpuCard` — one physical GPU; adds a memory bar + per-user legend,
-      shows every column in normal mode and the metadata layout in zen mode.
-    * :class:`CpuCard` — the watched user's non-GPU, scopos-reporting processes;
-      a host-RAM view with no GPU memory column.
+def meta_column(key: str) -> _Column:
+    """A column for a user-reported metadata field (progress bars animate)."""
+    def render(card: Any, proc: ProcInfo, _key: str = key) -> Any:
+        value = proc.meta.get(_key)
+        if value is None:
+            return Text("")
+        if is_progress(value):
+            return render_progress(value, getattr(card, "_frame", 0))
+        return Text(str(value))
 
-    The two are parallel siblings (much like ``Monitor`` / ``DemoMonitor``).
+    return _Column(
+        key=f"meta:{key}",
+        label=key.upper(),
+        sort=lambda p, _key=key: _meta_sort_value(p.meta.get(_key)),
+        render=render,
+        meta_key=key,
+    )
+
+
+def columns_with_meta(fixed_keys: Tuple[str, ...], procs: List[ProcInfo]) -> List[_Column]:
+    """Fixed columns + one column per reported field (first-seen order) + COMMAND."""
+    fixed = [COLS[k] for k in fixed_keys if _visible(k)]
+    meta_keys: List[str] = []
+    for proc in procs:
+        for key in proc.meta:
+            if key not in meta_keys:
+                meta_keys.append(key)
+    tail = [COLS["COMMAND"]] if _visible("COMMAND") else []
+    return (fixed + [meta_column(k) for k in meta_keys] + tail) or [COLS["PID"]]
+
+
+# Width of the leading checkbox column shown while batch-selecting in kill mode.
+CHECK_WIDTH = 3
+
+
+class ProcTable(Vertical):
+    """A reusable process table: sorting, hover tooltips, a right-click
+    copy/kill menu, cursor persistence across refreshes, and — when kill mode is
+    armed — batch selection via a leading checkbox column.
+
+    The owner supplies a ``columns_for(procs) -> [_Column]`` callback and feeds
+    rows with :meth:`update`. This is the single home for all the table
+    interaction shared by the GPU/CPU cards and the tmux view.
     """
 
-    # Layout-driven bits (padding, max width/height) come from scopos.config.
-    # A ``DeviceCard`` type selector also matches the GpuCard/CpuCard subclasses.
+    DEFAULT_CSS = f"""
+    ProcTable {{ height: auto; }}
+    ProcTable DataTable {{ height: auto; max-height: {config.TABLE_MAX_HEIGHT}; }}
+    """
+
+    def __init__(self, monitor: Monitor, columns_for: Callable[[List[ProcInfo]], List[_Column]],
+                 *, danger: bool = False):
+        super().__init__()
+        self.monitor = monitor
+        self._columns_for = columns_for
+        self.danger = danger
+        self.table = DataTable(zebra_stripes=True, cursor_type="row",
+                               cell_padding=config.TABLE_CELL_PADDING)
+        self.selected: set = set()        # pids ticked for batch kill
+        self._procs: List[ProcInfo] = []
+        self._row_procs: List[ProcInfo] = []
+        self._columns: List[_Column] = []
+        self._anim_cells: List[Tuple[int, int, Dict[str, Any]]] = []
+        self._sort_key: Optional[str] = None
+        self._sort_reverse: bool = False
+        self._frame: int = 0
+        self._cursor_pid: Optional[int] = None   # row to re-select after refresh
+        self._suspend_track = False
+        self._empty_message = "— no processes —"
+        self._row_style: Optional[Callable[[ProcInfo], Optional[str]]] = None
+        self._extra_menu: Optional[Callable[[ProcInfo], List[Tuple]]] = None
+        self._menu_extra: Dict[str, Tuple[List[ProcInfo], str]] = {}
+
+    def compose(self):
+        yield self.table
+
+    def on_mount(self):
+        self.watch(self.table, "hover_coordinate", self._hover_changed)
+
+    # -- owner API ---------------------------------------------------------
+    def set_danger(self, danger: bool):
+        self.danger = danger
+
+    def clear_selection(self):
+        if self.selected:
+            self.selected.clear()
+            self._rebuild()
+
+    def update(self, procs: List[ProcInfo], *, empty_message: str = "— no processes —",
+               row_style: Optional[Callable[[ProcInfo], Optional[str]]] = None,
+               extra_menu: Optional[Callable[[ProcInfo], List[Tuple]]] = None):
+        self._procs = list(procs)
+        self._empty_message = empty_message
+        self._row_style = row_style
+        self._extra_menu = extra_menu
+        self._rebuild()
+
+    def animate_progress(self, frame: int):
+        self._frame = frame
+        for row, col, data in self._anim_cells:
+            try:
+                self.table.update_cell_at(Coordinate(row, col), render_progress(data, frame), update_width=False)
+            except Exception:
+                pass
+
+    # -- rendering ---------------------------------------------------------
+    def _rebuild(self):
+        table = self.table
+        self._suspend_track = True
+        table.clear(columns=True)
+        self._anim_cells = []
+
+        procs = list(self._procs)
+        columns = self._columns_for(procs) or [COLS["PID"]]
+        self._columns = columns
+
+        if not procs:
+            self._row_procs = []
+            table.add_column("")
+            table.add_row(Text(self._empty_message, style="dim"))
+            self._suspend_track = False
+            return
+
+        sort_col = next((c for c in columns if c.key == self._sort_key and c.sort), None)
+        if sort_col:
+            procs.sort(key=sort_col.sort, reverse=self._sort_reverse)
+        check = self.danger
+        if check and self.selected:
+            # Ticked rows float to the top so it's obvious what's selected.
+            procs = ([p for p in procs if p.pid in self.selected]
+                     + [p for p in procs if p.pid not in self.selected])
+        self._row_procs = procs
+
+        if check:
+            table.add_column(Text("✓", justify="center"), width=CHECK_WIDTH)
+        for col in columns:
+            label = col.label
+            if col.key == self._sort_key:
+                label = label if col.width is None else label.center(col.width)
+                label = Text(label, style="reverse" if self._sort_reverse else "reverse underline")
+            table.add_column(label, width=col.width)
+
+        offset = 1 if check else 0
+        for r, proc in enumerate(procs):
+            style = self._row_style(proc) if self._row_style else None
+            row: List[Any] = []
+            if check:
+                ticked = proc.pid in self.selected
+                row.append(Text("☑" if ticked else "☐", justify="center",
+                                style="bold green" if ticked else "dim"))
+            for ci, col in enumerate(columns):
+                cell = _fit_cell(col.render(self, proc), col.width)
+                if style:
+                    cell = cell.copy() if isinstance(cell, Text) else Text(str(cell))
+                    cell.stylize(style)
+                row.append(cell)
+                if col.meta_key is not None:
+                    value = proc.meta.get(col.meta_key)
+                    if value is not None and is_progress(value) and value.get("frac") is None:
+                        self._anim_cells.append((r, offset + ci, value))
+            table.add_row(*row)
+
+        self._restore_cursor()
+        self._suspend_track = False
+
+    def _restore_cursor(self):
+        if self._cursor_pid is None:
+            return
+        for i, proc in enumerate(self._row_procs):
+            if proc.pid == self._cursor_pid:
+                try:
+                    self.table.move_cursor(row=i, animate=False)
+                except Exception:
+                    pass
+                return
+
+    # -- cursor tracking ---------------------------------------------------
+    def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted):
+        if self._suspend_track:
+            return
+        r = event.cursor_row
+        if 0 <= r < len(self._row_procs):
+            self._cursor_pid = self._row_procs[r].pid
+
+    # -- sorting -----------------------------------------------------------
+    def on_data_table_header_selected(self, event: DataTable.HeaderSelected):
+        event.stop()
+        idx = event.column_index - (1 if self.danger else 0)
+        if not (0 <= idx < len(self._columns)):
+            return
+        col = self._columns[idx]
+        if col.sort is None:
+            return
+        if self._sort_key == col.key:
+            self._sort_reverse = not self._sort_reverse
+        else:
+            self._sort_key = col.key
+            self._sort_reverse = col.key in DESC_FIRST_KEYS
+        self._rebuild()
+
+    # -- mouse: checkbox toggle + right-click menu -------------------------
+    def on_mouse_down(self, event: events.MouseDown):
+        coord = self.table.hover_coordinate
+        valid_row = coord is not None and 0 <= coord.row < len(self._row_procs)
+        # Left-click the checkbox column toggles selection (kill mode only).
+        if event.button == 1 and self.danger and valid_row and coord.column == 0:
+            proc = self._row_procs[coord.row]
+            self.selected.discard(proc.pid) if proc.pid in self.selected else self.selected.add(proc.pid)
+            self._cursor_pid = proc.pid
+            event.stop(); event.prevent_default()
+            self._rebuild()
+            return
+        if event.button != 3 or not valid_row:
+            return
+        event.stop(); event.prevent_default()
+        proc = self._row_procs[coord.row]
+        options: List[Tuple[str, str]] = [("copy", "📋 Copy info ")]
+        self._menu_extra = {}
+        if self.danger:
+            options.append(("kill", f"💀 Kill (PID {proc.pid}) "))
+            if self.selected:
+                options.append(("kill_sel", f"💀 Kill {len(self.selected)} selected "))
+            if self._extra_menu:
+                for oid, label, procs, scope in self._extra_menu(proc):
+                    self._menu_extra[oid] = (procs, scope)
+                    options.append((oid, label))
+        x = getattr(event, "screen_x", event.x)
+        y = getattr(event, "screen_y", event.y)
+        self.app.push_screen(ContextMenu(options, x, y),
+                             lambda choice, p=proc: self._on_menu(choice, p))
+
+    def _on_menu(self, choice: Optional[str], proc: ProcInfo):
+        if choice == "copy":
+            self._copy(proc)
+        elif choice == "kill":
+            self._confirm_kill([proc], f"PID {proc.pid}")
+        elif choice == "kill_sel":
+            procs = [p for p in self._row_procs if p.pid in self.selected]
+            self._confirm_kill(procs, f"{len(procs)} selected")
+        elif choice in self._menu_extra:
+            procs, scope = self._menu_extra[choice]
+            self._confirm_kill(procs, scope)
+
+    # -- copy / kill -------------------------------------------------------
+    def _clean_cell(self, col: _Column, proc: ProcInfo) -> str:
+        if col.meta_key is not None:
+            raw = proc.meta.get(col.meta_key)
+            if raw is None:
+                return ""
+            return _progress_text(raw) if is_progress(raw) else str(raw)
+        value = col.render(self, proc)
+        return value.plain if isinstance(value, Text) else str(value)
+
+    def _proc_info(self, proc: ProcInfo) -> str:
+        return "\n".join(f"{col.label}: {self._clean_cell(col, proc)}".rstrip()
+                         for col in self._columns)
+
+    def _copy(self, proc: ProcInfo):
+        try:
+            self.app.copy_to_clipboard(self._proc_info(proc))
+            self._notify(f"Copied info for PID {proc.pid}")
+        except Exception as exc:
+            self._notify(f"Copy failed: {exc}", error=True)
+
+    def _confirm_kill(self, procs: List[ProcInfo], scope: str):
+        if not procs:
+            return
+        if len(procs) == 1:
+            msg = ("⚠ Kill this process?\nThis sends a terminate signal and cannot be undone.\n\n"
+                   + self._proc_info(procs[0]))
+            label = "Kill"
+        else:
+            listing = "\n".join(f"  • {p.pid:>7}  {_clip(p.cmd or p.pname, 60)}" for p in procs)
+            msg = (f"⚠ Multi-process kill — {scope} ({len(procs)} processes).\n"
+                   "ALL of them will be sent a terminate signal (cannot be undone):\n\n" + listing)
+            label = f"Kill {len(procs)}"
+        self.app.push_screen(ConfirmScreen(msg, confirm_label=label),
+                             lambda ok, ps=list(procs): self._do_kill(ps) if ok else None)
+
+    def _do_kill(self, procs: List[ProcInfo]):
+        killed = failed = 0
+        for proc in sorted(procs, key=lambda p: p.pid, reverse=True):
+            try:
+                psutil.Process(proc.pid).terminate()
+                killed += 1
+            except psutil.NoSuchProcess:
+                killed += 1
+            except Exception:
+                failed += 1
+            self.selected.discard(proc.pid)
+        if failed:
+            self._notify(f"Killed {killed}, failed {failed} (permission?)", error=True)
+        else:
+            self._notify(f"Sent terminate signal to {killed} process(es)")
+        try:
+            self.app.refresh_data()
+        except Exception:
+            pass
+
+    def _hover_changed(self, coord: Optional[Coordinate]):
+        table = self.table
+        offset = 1 if self.danger else 0
+        if coord is None or not (0 <= coord.row < len(self._row_procs)):
+            table.tooltip = None
+            return
+        ci = coord.column - offset
+        if not (0 <= ci < len(self._columns)):
+            table.tooltip = None
+            return
+        table.tooltip = self._clean_cell(self._columns[ci], self._row_procs[coord.row]) or None
+
+    def _notify(self, message: str, error: bool = False):
+        try:
+            self.app.notify(message, severity="error" if error else "information")
+        except Exception:
+            pass
+
+
+class DeviceCard(Vertical):
+    """Base card: a title, a one-line summary and a shared :class:`ProcTable`.
+
+    Subclasses provide the header (title + stats, plus any extra widgets such as
+    a GPU memory bar) and decide which columns / processes to show. The table
+    itself and every interaction live in the reusable ProcTable.
+    """
+
     DEFAULT_CSS = f"""
     DeviceCard {{
         height: auto;
@@ -269,85 +582,33 @@ class DeviceCard(Vertical):
     }}
     DeviceCard .stats {{ height: 1; }}
     DeviceCard .legend {{ height: auto; color: $text-muted; }}
-    DeviceCard DataTable {{
-        height: auto;
-        max-height: {config.TABLE_MAX_HEIGHT};
-        margin-top: 1;
-    }}
+    DeviceCard ProcTable {{ margin-top: 1; }}
     """
 
     def __init__(self, monitor: Monitor, danger: bool = False):
         super().__init__()
         self.monitor = monitor
-        # ``danger`` only changes what the right-click menu offers (adds Kill).
         self.danger = danger
         self.stats = Static(classes="stats")
-        self.table = DataTable(
-            zebra_stripes=True,
-            cursor_type="row",
-            cell_padding=config.TABLE_CELL_PADDING,
-        )
-        self._deferred: Optional[DeviceInfo] = None  # update arriving before mount
+        self.proc_table = ProcTable(monitor, self._columns_for, danger=danger)
         self._device: Optional[DeviceInfo] = None
-        self._sort_key: Optional[str] = None
-        self._sort_reverse: bool = False
-        self._columns: List[_Column] = NORMAL_COLUMNS
-        # The processes currently shown, in row order, for hover/right-click.
-        self._row_procs: List[ProcInfo] = []
-        # (row, column, progress-data) for indeterminate bars we animate.
-        self._anim_cells: List[Tuple[int, int, Dict[str, Any]]] = []
-        self._frame: int = 0
+        self._deferred: Optional[DeviceInfo] = None
+
+    def compose(self):
+        yield self.stats
+        yield from self._extra_widgets()
+        yield self.proc_table
+
+    def _extra_widgets(self):
+        """Header widgets between the stats line and the table (GPU adds a bar)."""
+        return iter(())
 
     def on_mount(self):
-        # Keep the table's tooltip in sync with the cell under the mouse so a
-        # long, truncated column can be read in full just by hovering it.
-        self.watch(self.table, "hover_coordinate", self._hover_changed)
         if self._deferred is not None:
             self._apply(self._deferred)
 
-    # -- mode --------------------------------------------------------------
-    def set_danger(self, danger: bool):
-        """Danger mode only affects whether the menu offers Kill (no re-render)."""
-        self.danger = danger
-
-    # -- sorting -----------------------------------------------------------
-    def on_data_table_header_selected(self, event: DataTable.HeaderSelected):
-        event.stop()
-        idx = event.column_index
-        if idx >= len(self._columns):
-            return
-        col = self._columns[idx]
-        if col.sort is None:
-            return
-        if self._sort_key == col.key:
-            self._sort_reverse = not self._sort_reverse
-        else:
-            self._sort_key = col.key
-            self._sort_reverse = col.key in DESC_FIRST_KEYS
-        if self._device is not None:
-            self._update_table(self._device)
-
-    # -- animation ---------------------------------------------------------
-    def animate_progress(self, frame: int):
-        """Re-render indeterminate progress cells so their blocks move."""
-        self._frame = frame
-        if not self._anim_cells:
-            return
-        for row, col, data in self._anim_cells:
-            try:
-                self.table.update_cell_at(
-                    Coordinate(row, col),
-                    render_progress(data, frame),
-                    update_width=False,
-                )
-            except Exception:
-                # Table was rebuilt out from under us; the next refresh fixes it.
-                pass
-
     # -- updating ----------------------------------------------------------
     def update(self, device: DeviceInfo):
-        # A card may be updated in the same frame it is mounted, before its
-        # columns exist; defer until on_mount in that case.
         if self.is_mounted:
             self._apply(device)
         else:
@@ -357,9 +618,19 @@ class DeviceCard(Vertical):
         self._deferred = None
         self._device = device
         self._render_header(device)
-        self._update_table(device)
+        self.proc_table.set_danger(self.danger)
+        self.proc_table.update(self._visible_procs(device), empty_message=self._empty_message())
 
-    # -- header / columns / procs (subclass-specific) ----------------------
+    def set_danger(self, danger: bool):
+        self.danger = danger
+        self.proc_table.set_danger(danger)
+        if self._device is not None and self.is_mounted:
+            self.proc_table.update(self._visible_procs(self._device), empty_message=self._empty_message())
+
+    def animate_progress(self, frame: int):
+        self.proc_table.animate_progress(frame)
+
+    # -- subclass hooks ----------------------------------------------------
     def _render_header(self, device: DeviceInfo):
         raise NotImplementedError
 
@@ -373,173 +644,11 @@ class DeviceCard(Vertical):
         raise NotImplementedError
 
     def _columns_for(self, procs: List[ProcInfo]) -> List[_Column]:
-        # Metadata-centric layout: fixed columns + one column per reported field
-        # (first-seen order across the visible processes) + COMMAND last.
-        fixed = [COLS[k] for k in self._fixed_keys() if _visible(k)]
-        meta_keys: List[str] = []
-        for proc in procs:
-            for key in proc.meta:
-                if key not in meta_keys:
-                    meta_keys.append(key)
-        tail = [COLS["COMMAND"]] if _visible("COMMAND") else []
-        cols = fixed + [self._meta_column(key) for key in meta_keys] + tail
-        return cols or [COLS["PID"]]  # never leave the table column-less
-
-    def _meta_column(self, key: str) -> _Column:
-        def render(card: DeviceCard, proc: ProcInfo, _key: str = key) -> Any:
-            value = proc.meta.get(_key)
-            if value is None:
-                return Text("")
-            if is_progress(value):
-                return render_progress(value, card._frame)
-            return Text(str(value))
-
-        return _Column(
-            key=f"meta:{key}",
-            label=key.upper(),
-            sort=lambda p, _key=key: _meta_sort_value(p.meta.get(_key)),
-            render=render,
-            meta_key=key,
-        )
-
-    def _update_table(self, device: DeviceInfo):
-        # Rebuild columns each time so the sort arrow can move between headers
-        # and metadata columns can appear/disappear with the data.
-        self.table.clear(columns=True)
-        self._anim_cells = []
-
-        procs = self._visible_procs(device)
-
-        if procs:
-            columns = self._columns_for(procs)
-            self._columns = columns
-            # column labels
-            for col in columns:
-                label = col.label
-                if col.key == self._sort_key:
-                    label = label if col.width is None else label.center(col.width)
-                    label = Text(label, style="reverse" if self._sort_reverse else "reverse underline")
-                    if col.sort is not None:
-                        procs = sorted(procs, key=col.sort, reverse=self._sort_reverse)
-                self.table.add_column(label, width=col.width)
-            self._row_procs = procs
-            # rows
-            for row_idx, proc in enumerate(procs):
-                row = []
-                for col_idx, col in enumerate(columns):
-                    row.append(_fit_cell(col.render(self, proc), col.width))
-                    if col.meta_key is not None:
-                        value = proc.meta.get(col.meta_key)
-                        if value is not None and is_progress(value) and value.get("frac") is None:
-                            self._anim_cells.append((row_idx, col_idx, value))
-                self.table.add_row(*row)
-        else:
-            self._row_procs = []
-            self.table.add_columns("")  # at least one column is needed to show the message
-            self.table.add_row(Text(self._empty_message(), style="dim"))
-
-    # -- interaction: hover, right-click menu, kill ------------------------
-    def _hover_changed(self, coord: Optional[Coordinate]):
-        """Show the full (untruncated) value of the hovered cell as a tooltip.
-
-        Recomputed from the process + column rather than read from the table,
-        so it stays complete even though the cell itself is clipped.
-        """
-        table = self.table
-        if (
-            coord is None
-            or not (0 <= coord.row < len(self._row_procs))
-            or not (0 <= coord.column < len(self._columns))
-        ):
-            table.tooltip = None
-            return
-        proc = self._row_procs[coord.row]
-        col = self._columns[coord.column]
-        text = self._clean_cell(col, proc)
-        table.tooltip = text or None
-
-    def on_mouse_down(self, event: events.MouseDown):
-        # Right-click (button 3) on a process row opens the context menu.
-        if event.button != 3:
-            return
-        coord = self.table.hover_coordinate
-        if coord is None or not (0 <= coord.row < len(self._row_procs)):
-            return
-        event.stop()
-        event.prevent_default()
-        proc = self._row_procs[coord.row]
-        options: List[Tuple[str, str]] = [("copy", "📋 Copy info ")]
-        if self.danger:
-            options.append(("kill", f"💀 Kill process (PID {proc.pid}) "))
-        x = getattr(event, "screen_x", event.x)
-        y = getattr(event, "screen_y", event.y)
-        self.app.push_screen(
-            ContextMenu(options, x, y),
-            lambda choice, p=proc: self._on_menu(choice, p),
-        )
-
-    def _on_menu(self, choice: Optional[str], proc: ProcInfo):
-        if choice == "copy":
-            self._copy_proc(proc)
-        elif choice == "kill":
-            self._confirm_kill(proc)
-
-    def _row_info(self, proc: ProcInfo) -> str:
-        lines = []
-        for col in self._columns:
-            lines.append(f"{col.label}: {self._clean_cell(col, proc)}".rstrip())
-        return "\n".join(lines)
-
-    def _clean_cell(self, col: _Column, proc: ProcInfo) -> str:
-        """A clean, plain-text value for a cell (progress bars become text)."""
-        if col.meta_key is not None:
-            raw = proc.meta.get(col.meta_key)
-            if raw is None:
-                return ""
-            return _progress_text(raw) if is_progress(raw) else str(raw)
-        value = col.render(self, proc)
-        return value.plain if isinstance(value, Text) else str(value)
-
-    def _copy_proc(self, proc: ProcInfo):
-        info = self._row_info(proc)
-        try:
-            self.app.copy_to_clipboard(info)
-            self._notify(f"Copied info for PID {proc.pid}")
-        except Exception as exc:
-            self._notify(f"Copy failed: {exc}", error=True)
-
-    def _confirm_kill(self, proc: ProcInfo):
-        # Show the full row (same fields as "copy info") so it's easy to be sure
-        # this is the right process before sending a signal.
-        msg = (
-            "⚠ Kill this process?\nThis sends a terminate signal and cannot be undone.\n\n"
-            f"{self._row_info(proc)}"
-        )
-        self.app.push_screen(
-            ConfirmScreen(msg),
-            lambda ok, p=proc: self._do_kill(p) if ok else None,
-        )
-
-    def _do_kill(self, proc: ProcInfo):
-        try:
-            psutil.Process(proc.pid).terminate()
-            self._notify(f"Sent terminate signal to PID {proc.pid}")
-        except psutil.NoSuchProcess:
-            self._notify(f"Process {proc.pid} no longer exists")
-        except psutil.AccessDenied:
-            self._notify(f"Permission denied: cannot kill PID {proc.pid}", error=True)
-        except Exception as exc:
-            self._notify(f"Kill failed: {exc}", error=True)
-
-    def _notify(self, message: str, error: bool = False):
-        try:
-            self.app.notify(message, severity="error" if error else "information")
-        except Exception:
-            pass
+        return columns_with_meta(self._fixed_keys(), procs)
 
 
 class GpuCard(DeviceCard):
-    """One GPU: header, stats line, proportion bar, legend and process table."""
+    """One GPU: title, stats line, proportion bar, legend and process table."""
 
     def __init__(self, monitor: Monitor, zen: bool = False, danger: bool = False):
         super().__init__(monitor, danger=danger)
@@ -547,13 +656,10 @@ class GpuCard(DeviceCard):
         self.legend = Static(classes="legend")
         self.zen = zen
 
-    def compose(self):
-        yield self.stats
+    def _extra_widgets(self):
         yield self.bar
         yield self.legend
-        yield self.table
 
-    # -- mode --------------------------------------------------------------
     def set_zen(self, zen: bool):
         if zen == self.zen:
             return
@@ -570,7 +676,6 @@ class GpuCard(DeviceCard):
         self._update_legend(gpu)
 
     def _fixed_keys(self) -> Tuple[str, ...]:
-        """Built-in columns (besides metadata + COMMAND) for the zen layout."""
         return ZEN_FIXED_KEYS
 
     def _visible_procs(self, device: DeviceInfo) -> List[ProcInfo]:
@@ -579,10 +684,10 @@ class GpuCard(DeviceCard):
             return [p for p in device.procs if p.user == self.monitor.focus_user]
         return list(device.procs)
 
-    # Normal mode shows every column; zen mode uses the metadata layout (base).
+    # Normal mode shows every column; zen mode uses the metadata layout.
     def _columns_for(self, procs: List[ProcInfo]) -> List[_Column]:
         if self.zen:
-            return super()._columns_for(procs)
+            return columns_with_meta(self._fixed_keys(), procs)
         return NORMAL_COLUMNS or [COLS["PID"]]
 
     def _empty_message(self) -> str:
@@ -600,22 +705,17 @@ class GpuCard(DeviceCard):
             free_style = f"bold {config.COLOR_OK}"
 
         line = Text(no_wrap=True, overflow="ellipsis")
-        # PROC
         line.append("[PROC] ", style="bold")
         line.append(f"{len(gpu.procs)}    ", style="bold")
-        # USED
         line.append("[USED] ", style="bold")
         line.append(f"{fmt_gb(gpu.mem_used)}", style="bold")
         line.append(f" / {fmt_gb(gpu.mem_total)} GB", style="dim")
         line.append(f" ({gpu.used_rate * 100:.0f}%)    ")
-        # FREE
         line.append("[FREE] ", style="bold")
         line.append(f"{fmt_gb(gpu.mem_free)} GB ", style=free_style)
-        # ⚡
         if gpu.mem_util >= 0:
             line.append("   [⚡] ", style="bold")
             line.append(f"{gpu.mem_util}%", style=config.TEMP_COLOR)
-        # 🌡
         if gpu.temperature >= 0:
             line.append("   [🌡] ", style="bold")
             temp_style = config.COLOR_CRIT if gpu.temperature >= config.TEMP_WARN_C else config.TEMP_COLOR
@@ -638,15 +738,11 @@ class GpuCard(DeviceCard):
         for user, mem in ordered:
             color = self.monitor.color_for(user)
             pct = mem / gpu.mem_total * 100 if gpu.mem_total else 0
-            # In zen mode the watched user is highlighted in the legend even
-            # though the table is filtered down to just their processes.
             legend.append("🏆 " if user == mvp else "")
             if self.zen and user == self.monitor.focus_user:
-                # zen mode
                 legend.append("★ ", style=color)
                 legend.append(user, style=f"bold underline {color}")
             else:
-                # normal mode
                 legend.append(f"● {user}", style=color)
             legend.append(f" {fmt_gb(mem)} GB ({pct:.0f}%)   ")
         self.legend.update(legend)
@@ -659,9 +755,6 @@ class CpuCard(DeviceCard):
     it extends scopos to plain CPU jobs and to jobs not yet on a GPU. A job that
     later allocates GPU memory shows up under its GPU card automatically.
     """
-    def compose(self):
-        yield self.stats
-        yield self.table
 
     def _render_header(self, device: DeviceInfo):
         self.border_title = f" 🧮  <{device.name}>  ·  tracked process(es) of {self.monitor.focus_user} via scopos API "

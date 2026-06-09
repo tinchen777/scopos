@@ -87,11 +87,12 @@ one with `-m/--mode`):
 
 - **Global** — every GPU, every user (the classic layout).
 - **Zen** — focused on `-u/--user` (see below).
-- **Tmux** — a tree of *your own* tmux sessions → panes → processes, with the
-  same reported-metadata shown inline. Right-click a process, pane or session
-  to copy it; in danger mode you can also kill it. Killing a pane or session
-  that holds several processes asks for confirmation and lists every process
-  that will be terminated.
+- **Tmux** — *your own* tmux processes in one flat, grid-style table (same
+  columns and interactions as the cards), grouped by `session:win.pane`. Idle
+  pane shells are dimmed so the programs actually running stand out.
+  Right-click a row to copy it; in danger mode you can also kill the process,
+  its whole pane, or its whole session (multi-process kills list every affected
+  process and ask for confirmation).
 - **Info** — scopos version and this host's basic specs (CPU, RAM, GPUs).
 
 > tmux sockets are per-user, so the Tmux tab shows the tmux server of the user
@@ -132,6 +133,12 @@ show an **ETA** (`· ~3m 20s`) estimated from how fast the bar is advancing.
   menu also offers **Kill**, which shows the full details and asks for
   confirmation before sending a terminate signal. The status bar shows a red
   `⚠ DANGER` reminder while it is armed.
+- **Batch kill**: in danger mode a checkbox column appears; click it to tick
+  rows (ticked rows float to the top so they stay visible across refreshes,
+  and the row cursor is preserved too). Right-click → *Kill N selected* to kill
+  them together. Press <kbd>c</kbd> to clear all ticks.
+
+The bottom status bar also shows scopos's own CPU% / memory footprint.
 
 ## Tuning the layout & theme
 

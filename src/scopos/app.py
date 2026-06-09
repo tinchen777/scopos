@@ -4,6 +4,7 @@
 from __future__ import annotations
 import os
 import time
+import psutil
 from rich.text import Text
 from textual.binding import Binding
 from textual.app import (App, ComposeResult)
@@ -13,7 +14,7 @@ from typing import (Dict, List, Optional)
 
 from . import config
 from .monitor import (CPUInfo, GPUInfo, Monitor, DemoMonitor)
-from .widgets.grid import (GpuCard, CpuCard)
+from .widgets.grid import (GpuCard, CpuCard, ProcTable)
 from .widgets.others import (Clock, Logo, SysMeter, CPUMeter)
 from .widgets.views import (InfoView, TmuxView)
 
@@ -130,6 +131,7 @@ class ScoposApp(App):
         # Deliberately awkward so it isn't hit by accident: it arms right-click
         # process killing. Confirmed again per-kill by a dialog.
         Binding("ctrl+shift+k", "toggle_danger", "Danger/Kill mode"),
+        Binding("c", "clear_ticks", "Clear ticks", show=False),
     ]
 
     def __init__(self, focus_user: str, interval: int = 5, demo: bool = False, theme: str = "textual-dark", mode: str = "global"):
@@ -150,6 +152,9 @@ class ScoposApp(App):
         self._cpu_card: Optional[CpuCard] = None
         self._frame: int = 0
         self.theme = theme
+        # scopos's own process, for the self-usage readout in the status bar.
+        self._self_proc = psutil.Process(os.getpid())
+        self._self_proc.cpu_percent(None)  # prime the % baseline
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="topbar"):
@@ -240,6 +245,15 @@ class ScoposApp(App):
         self.mode = mode
         self.query_one("#switcher", ContentSwitcher).current = TABS_INFO[mode][1]
         self.refresh_data()
+
+    def action_clear_ticks(self):
+        """Uncheck every batch-selected row across all tables."""
+        cleared = 0
+        for table in self.query(ProcTable):
+            cleared += len(table.selected)
+            table.clear_selection()
+        if cleared:
+            self.notify(f"Cleared {cleared} selection(s)", timeout=2)
 
     def action_toggle_danger(self):
         """Arm/disarm right-click process killing (still confirmed per-kill)."""
@@ -343,6 +357,16 @@ class ScoposApp(App):
         self._cpu_card.set_danger(self.danger)
         self._cpu_card.update(cpu)
 
+    def _self_usage(self) -> str:
+        """scopos's own CPU% / RAM, for the status bar."""
+        try:
+            # cpu_percent since the previous call, normalised over all cores.
+            cpu = self._self_proc.cpu_percent(None) / (psutil.cpu_count() or 1)
+            mb = self._self_proc.memory_info().rss / (1024 ** 2)
+            return f"scopos {cpu:.0f}% · {mb:.0f} MB"
+        except Exception:
+            return "scopos —"
+
     def _set_status(self, main: str):
         text = Text(
             f"{main}  ·  {self.mode}  ·  press m for {self._next_mode()} mode",
@@ -350,6 +374,7 @@ class ScoposApp(App):
         )
         if self.danger:
             text.append("  ·  ⚠ DANGER (right-click to kill)", style="bold red")
+        text.append(f"  ·  {self._self_usage()}", style="dim")
         self.query_one("#status", Static).update(text)
 
     def on_unmount(self):
