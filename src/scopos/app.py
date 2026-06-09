@@ -2,45 +2,34 @@
 """The Scopos Textual application."""
 
 from __future__ import annotations
+import os
 import time
 from rich.text import Text
 from textual.binding import Binding
 from textual.app import (App, ComposeResult)
 from textual.containers import (Container, Horizontal, VerticalScroll)
-from textual.widgets import (Footer, Static)
+from textual.widgets import (Footer, Static, ContentSwitcher, Tab, Tabs)
 from typing import (Dict, List, Optional)
-
-from textual.widgets import (ContentSwitcher, Tab, Tabs)
 
 from . import config
 from .monitor import (CPUInfo, GPUInfo, Monitor, DemoMonitor)
 from .widgets.grid import (GpuCard, CpuCard)
-from .widgets.others import (Clock, Logo, SysMeter)
+from .widgets.others import (Clock, Logo, SysMeter, CPUMeter)
 from .widgets.views import (InfoView, TmuxView)
 
-# The tabs / modes, in cycle order. The first three are layouts over the same
-# device grid; "info" is a static page. ``info`` is treated as a mode here only
-# so the tab bar and the data dispatch share one source of truth.
-TABS = ("global", "zen", "tmux", "info")
-TAB_LABELS = {"global": "Global", "zen": "Zen", "tmux": "Tmux", "info": "Info"}
-VALID_MODES = TABS
-
-
-def _view_for(mode: str) -> str:
-    """Which ContentSwitcher panel a mode shows (global & zen share the grid)."""
-    return {"global": "view-grid", "zen": "view-grid",
-            "tmux": "view-tmux", "info": "view-info"}[mode]
+TABS_INFO = {
+    "global": ("Global Mode (g)", "view-grid"),
+    "zen": ("Zen Mode (z)", "view-grid"),
+    "tmux": ("Tmux Mode (t)", "view-tmux"),
+    "info": ("Info (i)", "view-info"),
+}
+TABS = list(TABS_INFO.keys())
 
 
 class ScoposApp(App):
     """Monitor GPU memory usage, grouped by user."""
 
     TITLE = "SCOPOS"
-
-    # Roughly the narrowest a card stays readable; used to pick column count.
-    # The full COMMAND column needs room, so cards stay wide and only tile into
-    # multiple columns on genuinely wide terminals. (Tunable in scopos.config.)
-    CARD_MIN_WIDTH = config.CARD_MIN_WIDTH
 
     # Grid gutter / padding come from scopos.config so spacing can be tuned there.
     CSS = f"""
@@ -49,32 +38,37 @@ class ScoposApp(App):
     }}
     #topbar {{
         height: 5;
-        padding: 0 1;
+        padding: 0 0;
         background: $panel;
     }}
-    #topbar Logo {{
+    #topbar #logo {{
         width: auto;
         height: 5;
+        padding-left: 1;
         content-align: left top;
-        background: $panel;
     }}
-    #topbar Clock {{
+    #topbar #clock {{
         width: auto;
         height: 4;
-        padding-bottom: 0;
         content-align: center bottom;
     }}
     #topbar #spacer1 {{
         width: 1fr;
     }}
     #topbar #spacer2 {{
-            width: 1fr;
-        }}
-    #topbar SysMeter {{
+        width: 1fr;
+    }}
+    #topbar #cpumeter {{
         width: auto;
         height: 5;
-        padding-right: 4;
-        padding-bottom: 1;
+        padding-right: 3;
+        content-align: right bottom;
+    }}
+
+    #topbar #sysmeter {{
+        width: auto;
+        height: 4;
+        padding-right: 2;
         content-align: right bottom;
     }}
     #grid {{
@@ -87,7 +81,26 @@ class ScoposApp(App):
     }}
     #tabs {{
         /* Textual 8: auto height may expand and starve the content switcher. */
-        height: 3;
+        height: 2;
+    }}
+    #tabs Tab {{
+        padding: 0 2;
+        color: $text;
+        background: $surface;
+    }}
+    #tabs Tab:hover {{
+        background: $boost;
+        color: green;
+    }}
+
+    #tabs Tab.-active {{
+        background: $primary;
+        color: $text;
+        text-style: bold;
+    }}
+
+    #tabs Tab.-active:hover {{
+        background: $primary-lighten-1;
     }}
     #switcher {{
         height: 1fr;
@@ -106,55 +119,56 @@ class ScoposApp(App):
     ANIM_INTERVAL = 0.25
 
     BINDINGS = [
-        ("q,escape", "quit", "Quit"),
-        ("r", "refresh", "Refresh now"),
-        ("m", "mode", "Toggle mode"),
-        Binding("g", "global_mode", show=False),
-        Binding("z", "zen_mode", show=False),
-        Binding("t", "tmux_mode", show=False),
-        Binding("i", "info", show=False),
-        ("d", "toggle_dark", "Light/Dark"),
+        Binding("q,escape", "quit", "Quit"),
+        Binding("r", "refresh", "Refresh Now"),
+        Binding("m", "mode", "Toggle Mode"),
+        Binding("g", "global_mode", "Global Mode", show=False),
+        Binding("z", "zen_mode", "Zen Mode", show=False),
+        Binding("t", "tmux_mode", "Tmux Mode", show=False),
+        Binding("i", "info", "Info", show=False),
+        Binding("d", "toggle_dark", "Light/Dark"),
         # Deliberately awkward so it isn't hit by accident: it arms right-click
         # process killing. Confirmed again per-kill by a dialog.
-        ("ctrl+shift+k", "toggle_danger", "Danger/Kill mode"),
+        Binding("ctrl+shift+k", "toggle_danger", "Danger/Kill mode"),
     ]
 
-    def __init__(self, focus_user: str = "", interval: int = 5, demo: bool = False, theme: str = "ansi-dark", mode: str = "global"):
+    def __init__(self, focus_user: str, interval: int = 5, demo: bool = False, theme: str = "textual-dark", mode: str = "global"):
         super().__init__()
+        if not focus_user:
+            focus_user = os.environ.get("USER", "?")
         self.interval = max(1, interval)
         self.demo = demo
         if demo:
             self.monitor = DemoMonitor(focus_user=focus_user)
         else:
             self.monitor = Monitor(focus_user=focus_user)
-        self.mode = mode if mode in VALID_MODES else "global"
+        self.mode = mode if mode in TABS else TABS[0]
         # When armed, the right-click menu offers "Kill"; off by default.
         self.danger = False
 
         self._gpu_cards: Dict[int, GpuCard] = {}
         self._cpu_card: Optional[CpuCard] = None
-        self._tmux_view = TmuxView(self.monitor, danger=self.danger)
-        self._info_view = InfoView(self.monitor)
         self._frame: int = 0
         self.theme = theme
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="topbar"):
-            yield Logo()
+            yield Logo(id="logo")
             yield Static(id="spacer1")
-            yield Clock()
+            yield Clock(id="clock")
             yield Static(id="spacer2")
-            yield SysMeter(self.interval)
-        yield Tabs(*(Tab(TAB_LABELS[m], id=f"tab-{m}") for m in TABS), id="tabs")
-        with ContentSwitcher(initial=_view_for(self.mode), id="switcher"):
+            yield CPUMeter(self.interval, id="cpumeter")
+            yield SysMeter(self.interval, id="sysmeter")
+        yield Tabs(*(Tab(i[0], id=f"tab-{m}") for m, i in TABS_INFO.items()), id="tabs")
+        with ContentSwitcher(initial=TABS_INFO[self.mode][1], id="switcher"):
             with VerticalScroll(id="view-grid"):
                 yield Container(id="grid")
             with VerticalScroll(id="view-tmux"):
-                yield self._tmux_view
+                yield TmuxView(self.monitor, id="tmux", danger=self.danger)
             with VerticalScroll(id="view-info"):
-                yield self._info_view
+                yield InfoView(self.monitor, id="info")
         yield Static(id="status")
-        yield Footer()
+        yield Footer(id="footer")
 
     def on_mount(self):
         # Selecting the tab fires TabActivated, which sets the view and refreshes.
@@ -186,15 +200,15 @@ class ScoposApp(App):
         if not self._gpu_cards and self._cpu_card is None:
             return
         card_num = len(self._gpu_cards) + (1 if self._cpu_card else 0)
-        cols = max(1, self.size.width // self.CARD_MIN_WIDTH)
+        cols = max(1, self.size.width // config.CARD_MIN_WIDTH)
         cols = min(cols, card_num)
         grid = self.query_one("#grid")
         grid.styles.grid_size_columns = cols
 
     # -- action ------------------------------------------------------------
     def _next_mode(self):
-        index = (VALID_MODES.index(self.mode) + 1) % len(VALID_MODES)
-        return VALID_MODES[index]
+        index = (TABS.index(self.mode) + 1) % len(TABS)
+        return TABS[index]
 
     def action_refresh(self):
         self.refresh_data()
@@ -224,7 +238,7 @@ class ScoposApp(App):
         if mode not in TABS:
             return
         self.mode = mode
-        self.query_one("#switcher", ContentSwitcher).current = _view_for(mode)
+        self.query_one("#switcher", ContentSwitcher).current = TABS_INFO[mode][1]
         self.refresh_data()
 
     def action_toggle_danger(self):
@@ -276,8 +290,9 @@ class ScoposApp(App):
 
     def _refresh_tmux(self):
         sessions = self.monitor.collect_tmux()
-        self._tmux_view.set_danger(self.danger)
-        self._tmux_view.update(sessions)
+        tmux = self.query_one("#tmux", TmuxView)
+        tmux.set_danger(self.danger)
+        tmux.update(sessions)
         n_proc = sum(len(s.all_procs) for s in sessions)
         self._set_status(
             f"tmux · {len(sessions)} session(s) · {n_proc} proc(s)  ·  "
@@ -285,7 +300,7 @@ class ScoposApp(App):
         )
 
     def _refresh_info(self):
-        self._info_view.update()
+        self.query_one("#info", InfoView).update()
         self._set_status("info  ·  scopos & host overview")
 
     def _sync_gpu_cards(self, gpus: List[GPUInfo]):

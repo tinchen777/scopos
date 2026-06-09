@@ -146,6 +146,10 @@ SYS_BAR_MAX = 26               # widest the meter bar gets on a roomy terminal
 SYS_BAR_MIN = 4                # narrowest bar before trailing text is dropped
 SYS_METER_MIN = 10             # smallest meter ever drawn (label + a tiny bar)
 
+CPU_USAGE_WARN = 70.0            # at/above this % -> COLOR_WARN
+CPU_USAGE_CRIT = 90.0            # at/above this % -> COLOR_CRIT
+CPU_USAGE_LEN = 6       # cells for CPU usage bars (e.g. "▂▃▅▇█") in the top-right corner
+
 # GPU temperature.
 TEMP_WARN_C = 80               # at/above this -> COLOR_CRIT
 TEMP_COLOR = "cyan"            # normal temperature colour

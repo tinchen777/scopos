@@ -15,6 +15,7 @@ from ..metadata.utils import is_progress
 from ..monitor import (DeviceInfo, GPUInfo, Monitor, ProcInfo, fmt_duration)
 from .dialogs import (ConfirmScreen, ContextMenu)
 from .. import config
+from ._utils import fmt_gb
 
 
 class MemoryBar(Widget):
@@ -170,10 +171,6 @@ def _user_cell(card: DeviceCard, p: ProcInfo) -> Text:
     return Text(f"● {p.user}", style=card.monitor.color_for(p.user))
 
 
-def _fmt_gb(num_bytes: float) -> str:
-    return "%.2f" % (num_bytes / (1024 ** 3))
-
-
 # All known columns, keyed for reuse across the normal / zen / CPU layouts.
 # MEM/GB is GPU memory; RAM/GB is host (CPU) memory, shown everywhere.
 # Widths come from ``config.COLUMN_WIDTHS`` so the layout can be tuned in one place.
@@ -190,8 +187,8 @@ ALL_COLUMNS: List[_Column] = [
     _Column("PID", "PID", lambda p: p.pid, lambda c, p: str(p.pid), width=_w("PID")),
     _Column("USER", "USER", lambda p: p.user.lower(), _user_cell, width=_w("USER")),
     _Column("NO.", "NO.", lambda p: (p.user.lower(), p.number), lambda c, p: p.number, width=_w("NO.")),
-    _Column("MEM/GB", "MEM/GB", lambda p: p.mem, lambda c, p: _fmt_gb(p.mem), width=_w("MEM/GB")),
-    _Column("RAM/GB", "RAM/GB", lambda p: p.rss, lambda c, p: _fmt_gb(p.rss), width=_w("RAM/GB")),
+    _Column("MEM/GB", "MEM/GB", lambda p: p.mem, lambda c, p: fmt_gb(p.mem), width=_w("MEM/GB")),
+    _Column("RAM/GB", "RAM/GB", lambda p: p.rss, lambda c, p: fmt_gb(p.rss), width=_w("RAM/GB")),
     _Column("RUNTIME", "RUNTIME", lambda p: p.runtime_sec, lambda c, p: p.runtime, width=_w("RUNTIME")),
     _Column("SESSION", "SESSION", lambda p: p.sname.lower(), lambda c, p: p.sname, width=_w("SESSION")),
     _Column("S.START", "S.START", lambda p: p.s_start_ts, lambda c, p: p.s_start, width=_w("S.START")),
@@ -471,9 +468,9 @@ class DeviceCard(Vertical):
         event.stop()
         event.prevent_default()
         proc = self._row_procs[coord.row]
-        options: List[Tuple[str, str]] = [("copy", "📋 Copy info")]
+        options: List[Tuple[str, str]] = [("copy", "📋 Copy info ")]
         if self.danger:
-            options.append(("kill", f"💀 Kill process (PID {proc.pid})"))
+            options.append(("kill", f"💀 Kill process (PID {proc.pid}) "))
         x = getattr(event, "screen_x", event.x)
         y = getattr(event, "screen_y", event.y)
         self.app.push_screen(
@@ -608,12 +605,12 @@ class GpuCard(DeviceCard):
         line.append(f"{len(gpu.procs)}    ", style="bold")
         # USED
         line.append("[USED] ", style="bold")
-        line.append(f"{_fmt_gb(gpu.mem_used)}", style="bold")
-        line.append(f" / {_fmt_gb(gpu.mem_total)} GB", style="dim")
+        line.append(f"{fmt_gb(gpu.mem_used)}", style="bold")
+        line.append(f" / {fmt_gb(gpu.mem_total)} GB", style="dim")
         line.append(f" ({gpu.used_rate * 100:.0f}%)    ")
         # FREE
         line.append("[FREE] ", style="bold")
-        line.append(f"{_fmt_gb(gpu.mem_free)} GB ", style=free_style)
+        line.append(f"{fmt_gb(gpu.mem_free)} GB ", style=free_style)
         # ⚡
         if gpu.mem_util >= 0:
             line.append("   [⚡] ", style="bold")
@@ -651,7 +648,7 @@ class GpuCard(DeviceCard):
             else:
                 # normal mode
                 legend.append(f"● {user}", style=color)
-            legend.append(f" {_fmt_gb(mem)} GB ({pct:.0f}%)   ")
+            legend.append(f" {fmt_gb(mem)} GB ({pct:.0f}%)   ")
         self.legend.update(legend)
 
 
@@ -671,7 +668,7 @@ class CpuCard(DeviceCard):
         rss_total = sum(p.rss for p in device.procs)
         line = Text(no_wrap=True, overflow="ellipsis")
         line.append(f"[PROC] {len(device.procs)}", style="bold")
-        line.append(f"    [RAM] {_fmt_gb(rss_total)} GB", style="bold")
+        line.append(f"    [RAM] {fmt_gb(rss_total)} GB", style="bold")
         self.stats.update(line)
 
     def _fixed_keys(self) -> Tuple[str, ...]:

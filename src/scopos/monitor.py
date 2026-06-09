@@ -549,7 +549,7 @@ class DemoMonitor(Monitor):
     ]
     GPU_TOTAL_GB = [24, 80, 80, 80]
 
-    def __init__(self, focus_user: str = ""):
+    def __init__(self, focus_user: str):
         super().__init__(focus_user=focus_user)
         self._jobs: Optional[List[Dict[str, Any]]] = None
 

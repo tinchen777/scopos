@@ -15,7 +15,7 @@ from typing import (List, Optional, Tuple)
 from .. import (__version__, __author__)
 from ..metadata.utils import is_progress
 from ..monitor import (Monitor, ProcInfo, TmuxSession)
-from .grid import (_fmt_gb, _progress_text)
+from .grid import (fmt_gb, _progress_text)
 from .dialogs import (ConfirmScreen, ContextMenu)
 
 
@@ -41,7 +41,7 @@ def proc_info_text(proc: ProcInfo) -> str:
         f"USER: {proc.user}",
         f"SESSION: {proc.sname}",
         f"RUNTIME: {proc.runtime}",
-        f"RAM: {_fmt_gb(proc.rss)} GB",
+        f"RAM: {fmt_gb(proc.rss)} GB",
         f"COMMAND: {proc.cmd or proc.pname}",
     ]
     for key, value in proc.meta.items():
@@ -64,8 +64,8 @@ class TmuxView(Vertical):
     TmuxView #hint { height: auto; color: $text-muted; padding: 0 2; }
     """
 
-    def __init__(self, monitor: Monitor, danger: bool = False):
-        super().__init__()
+    def __init__(self, monitor: Monitor, id: str, danger: bool = False):
+        super().__init__(id=id)
         self.monitor = monitor
         self.danger = danger
         self._tree: Tree = Tree("tmux")
@@ -129,7 +129,7 @@ class TmuxView(Vertical):
         if summary:
             label.append("  ")
             label.append(summary, style="cyan")
-        label.append(f"   RAM {_fmt_gb(proc.rss)}G · {proc.runtime}", style="dim")
+        label.append(f"   RAM {fmt_gb(proc.rss)}G · {proc.runtime}", style="dim")
         return label
 
     # -- interaction -------------------------------------------------------
@@ -243,8 +243,8 @@ class InfoView(Vertical):
     InfoView Static { height: auto; }
     """
 
-    def __init__(self, monitor: Monitor):
-        super().__init__()
+    def __init__(self, monitor: Monitor, id: str):
+        super().__init__(id=id)
         self.monitor = monitor
         self._body = Static()
 
