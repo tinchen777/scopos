@@ -7,7 +7,7 @@ import psutil
 from collections import deque
 from rich.text import Text
 from textual.widgets import Static
-from typing import (Optional, Tuple)
+from typing import Optional
 
 from .. import (__version__, __author__)
 from .. import config
@@ -49,10 +49,10 @@ class Clock(Static):
 
     def show_time(self, ts: Optional[float] = None):
         now = time.localtime(ts) if ts is not None else time.localtime()
-        text = Text(justify="center")
+        text = Text(justify="full")
         text.append(time.strftime("%Y-%m-%d\n", now), style="bold")
-        text.append(time.strftime("  %A\n", now), style="italic")
-        text.append(time.strftime(" %H:%M:%S", now), style="bold cyan")
+        text.append(time.strftime("%A\n", now), style="italic")
+        text.append(time.strftime("%H:%M:%S", now), style="bold cyan")
         self.update(text)
 
     # Backwards-compatible alias.
@@ -115,20 +115,20 @@ class CPUMeter(Static):
         text = Text(justify="left")
         # header
         text.append(" " * config.CPU_USAGE_LEN, style="underline grey50")
-        text.append("     \n", style="bold")
+        text.append("       \n", style="bold")
         # upper
         text.append("▕", style="grey50")
         text.append("".join(uppers), style="green")
         text.append("▏", style="grey50")
-        text.append(" CPU\n", style="bold")
+        text.append("  CPU \n", style="bold")
         # lower
         text.append("▕", style="grey50")
         text.append("".join(lowers), style="green")
         text.append("▏", style="grey50")
-        text.append(f"{cpu_usage:3.0f}%\n", style=color)
+        text.append(f"{cpu_usage:5.1f}%\n", style=color)
         # bottom
         text.append("‾" * config.CPU_USAGE_LEN, style="grey50")
-        text.append("     ", style="bold")
+        text.append("       ", style="bold")
 
         return text
 

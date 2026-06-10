@@ -79,7 +79,7 @@ def make_progress(
         # total is None
         frac = float(value)
         if 0.0 <= value <= 1.0:
-            auto_label = f"{frac * 100:.0f}%"
+            auto_label = f"{frac * 100:5.1f}%"
         else:
             auto_label = str(frac)
 

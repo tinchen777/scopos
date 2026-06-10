@@ -33,88 +33,91 @@ class ScoposApp(App):
     TITLE = "SCOPOS"
 
     # Grid gutter / padding come from scopos.config so spacing can be tuned there.
-    CSS = f"""
-    Screen {{
-        layout: vertical;
-    }}
-    #topbar {{
+    TOPBAR_CSS = """
+    #topbar {
         height: 5;
         padding: 0 0;
         background: $panel;
-    }}
-    #topbar #logo {{
+    }
+    #topbar #logo {
         width: auto;
         height: 5;
         padding-left: 1;
         content-align: left top;
-    }}
-    #topbar #clock {{
+    }
+    #topbar #clock {
         width: auto;
         height: 4;
         content-align: center bottom;
-    }}
-    #topbar #spacer1 {{
+    }
+    #topbar #spacer1 {
         width: 1fr;
-    }}
-    #topbar #spacer2 {{
+    }
+    #topbar #spacer2 {
         width: 1fr;
-    }}
-    #topbar #cpumeter {{
+    }
+    #topbar #cpumeter {
         width: auto;
         height: 5;
         padding-right: 3;
         content-align: right bottom;
-    }}
-
-    #topbar #sysmeter {{
+    }
+    #topbar #sysmeter {
         width: auto;
         height: 4;
         padding-right: 2;
         content-align: right bottom;
-    }}
+    }
+    """
+    TAB_CSS = """
+    #tabs {
+        /* Textual 8: auto height may expand and starve the content switcher. */
+        height: 2;
+    }
+    #tabs Tab {
+        padding: 0 2;
+        color: $text;
+        background: $surface;
+    }
+    #tabs Tab:hover {
+        background: $boost;
+        color: green;
+    }
+    #tabs Tab.-active {
+        background: $primary;
+        color: $text;
+        text-style: bold;
+    }
+    #tabs Tab.-active:hover {
+        background: $primary-lighten-1;
+    }
+    #switcher {
+        height: 1fr;
+    }
+    #switcher > VerticalScroll {
+        height: 1fr;
+    }
+    """
+    GRID_CSS = f"""
     #grid {{
         layout: grid;
-        grid-size: 1;
+        grid-size: 2;
         grid-rows: auto;
         grid-gutter: {config.GRID_GUTTER[0]} {config.GRID_GUTTER[1]};
         height: auto;
         padding: {config.GRID_PADDING[0]} {config.GRID_PADDING[1]};
     }}
-    #tabs {{
-        /* Textual 8: auto height may expand and starve the content switcher. */
-        height: 2;
-    }}
-    #tabs Tab {{
-        padding: 0 2;
-        color: $text;
-        background: $surface;
-    }}
-    #tabs Tab:hover {{
-        background: $boost;
-        color: green;
-    }}
-
-    #tabs Tab.-active {{
-        background: $primary;
-        color: $text;
-        text-style: bold;
-    }}
-
-    #tabs Tab.-active:hover {{
-        background: $primary-lighten-1;
-    }}
-    #switcher {{
-        height: 1fr;
-    }}
-    #switcher > VerticalScroll {{
-        height: 1fr;
-    }}
-    #status {{
+    """
+    CSS = """
+    Screen {
+        layout: vertical;
+    }
+    #status {
         height: 1;
         padding: 0 2;
         color: $text-muted;
-    }}
-    """
+    }
+    """ + TOPBAR_CSS + TAB_CSS + GRID_CSS
 
     # How often (seconds) indeterminate progress bars advance a frame.
     ANIM_INTERVAL = 0.25
@@ -138,12 +141,13 @@ class ScoposApp(App):
         super().__init__()
         if not focus_user:
             focus_user = os.environ.get("USER", "?")
+        self.focus_user = focus_user.strip()
         self.interval = max(1, interval)
         self.demo = demo
         if demo:
-            self.monitor = DemoMonitor(focus_user=focus_user)
+            self.monitor = DemoMonitor(focus_user=self.focus_user)
         else:
-            self.monitor = Monitor(focus_user=focus_user)
+            self.monitor = Monitor(focus_user=self.focus_user)
         self.mode = mode if mode in TABS else TABS[0]
         # When armed, the right-click menu offers "Kill"; off by default.
         self.danger = False
@@ -153,8 +157,9 @@ class ScoposApp(App):
         self._frame: int = 0
         self.theme = theme
         # scopos's own process, for the self-usage readout in the status bar.
+        # FIXME
         self._self_proc = psutil.Process(os.getpid())
-        self._self_proc.cpu_percent(None)  # prime the % baseline
+        self._self_proc.cpu_percent()
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="topbar"):
@@ -240,11 +245,10 @@ class ScoposApp(App):
 
     def on_tabs_tab_activated(self, event: Tabs.TabActivated):
         mode = (event.tab.id or "").removeprefix("tab-")
-        if mode not in TABS:
-            return
-        self.mode = mode
-        self.query_one("#switcher", ContentSwitcher).current = TABS_INFO[mode][1]
-        self.refresh_data()
+        if mode in TABS:
+            self.mode = mode
+            self.query_one("#switcher", ContentSwitcher).current = TABS_INFO[mode][1]
+            self.refresh_data()
 
     def action_clear_ticks(self):
         """Uncheck every batch-selected row across all tables."""
@@ -260,9 +264,9 @@ class ScoposApp(App):
         self.danger = not self.danger
         self.refresh_data()
         self.notify(
-            "DANGER mode ON\n — right-click a process to Kill it (you'll be asked to confirm)"
-            if self.danger else "DANGER mode OFF",
-            title="⚠ DANGER" if self.danger else "Safe",
+            "Danger Mode ON\nRight-click a process to kill it (confirmation required)."
+            if self.danger else "Danger Mode OFF",
+            title="⚠ DANGER" if self.danger else "SAFE",
             severity="warning" if self.danger else "information",
             timeout=6,
         )
@@ -283,10 +287,10 @@ class ScoposApp(App):
             pass
 
     def _refresh_grid(self):
-        gpus, gpu_procs = self.monitor.collect_GPU()
+        gpus, user_procs = self.monitor.collect_GPU()
         self._sync_gpu_cards(gpus)
         if self.mode == "zen":
-            cpu = self.monitor.collect_CPU({p.pid for p in gpu_procs})
+            cpu = self.monitor.collect_CPU({p.pid for p in user_procs[self.focus_user]})
             self._sync_cpu_card(cpu)
             n_cpu_procs = len(cpu.procs)
         else:
@@ -297,9 +301,9 @@ class ScoposApp(App):
             n_cpu_procs = 0
         demo_tag = "demo" if self.demo else "live"
         self._set_status(
-            f"{len(gpus)} GPU(s) · {len(gpu_procs) + n_cpu_procs} proc(s) · "
+            f"{len(gpus)} GPU(s) · {sum(len(gpu.procs) for gpu in gpus) + n_cpu_procs} proc(s) · "
             f"{sum(len(g.user_mems) for g in gpus)} user(s)  ·  refresh {self.interval}s  ·  "
-            f"{demo_tag}  ·  focus on [{self.monitor.focus_user}]"
+            f"{demo_tag}  ·  focus on [{self.focus_user}]"
         )
 
     def _refresh_tmux(self):
@@ -310,7 +314,7 @@ class ScoposApp(App):
         n_proc = sum(len(s.all_procs) for s in sessions)
         self._set_status(
             f"tmux · {len(sessions)} session(s) · {n_proc} proc(s)  ·  "
-            f"focus on [{self.monitor.focus_user}]  ·  your own tmux server only"
+            f"focus on [{self.focus_user}]  ·  your own tmux server only"
         )
 
     def _refresh_info(self):
@@ -361,9 +365,8 @@ class ScoposApp(App):
         """scopos's own CPU% / RAM, for the status bar."""
         try:
             # cpu_percent since the previous call, normalised over all cores.
-            cpu = self._self_proc.cpu_percent(None) / (psutil.cpu_count() or 1)
             mb = self._self_proc.memory_info().rss / (1024 ** 2)
-            return f"scopos {cpu:.0f}% · {mb:.0f} MB"
+            return f"scopos {mb:.0f} MB"
         except Exception:
             return "scopos —"
 
@@ -378,4 +381,4 @@ class ScoposApp(App):
         self.query_one("#status", Static).update(text)
 
     def on_unmount(self):
-        self.monitor.stop()
+        self.monitor.pn_stop()

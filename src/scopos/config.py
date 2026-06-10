@@ -51,10 +51,10 @@ CARD_MIN_WIDTH = 100
 CARD_MAX_WIDTH: Optional[int] = None
 
 # Gap between cards: (vertical_rows, horizontal_cells).
-GRID_GUTTER = (1, 2)
+GRID_GUTTER = (0, 1)
 
 # Padding inside the whole grid: (vertical, horizontal).
-GRID_PADDING = (1, 2)
+GRID_PADDING = (0, 1)
 
 # Padding inside each card: (vertical, horizontal).
 CARD_PADDING = (0, 1)
