@@ -123,18 +123,19 @@ class ScoposApp(App):
     ANIM_INTERVAL = 0.25
 
     BINDINGS = [
-        Binding("q,escape", "quit", "Quit"),
-        Binding("r", "refresh", "Refresh Now"),
-        Binding("m", "mode", "Toggle Mode"),
+        Binding("q,escape", "quit", "Quit", key_display="Q"),
+        Binding("r", "refresh", "Refresh Now", key_display="R"),
+        Binding("m", "mode", "Toggle Mode", key_display="M"),
         Binding("g", "global_mode", "Global Mode", show=False),
         Binding("z", "zen_mode", "Zen Mode", show=False),
         Binding("t", "tmux_mode", "Tmux Mode", show=False),
         Binding("i", "info", "Info", show=False),
-        Binding("d", "toggle_dark", "Light/Dark"),
+        Binding("h", "toggle_dark", "Theme Light", key_display="H"),
         # Deliberately awkward so it isn't hit by accident: it arms right-click
         # process killing. Confirmed again per-kill by a dialog.
-        Binding("ctrl+shift+k", "toggle_danger", "Danger/Kill mode"),
-        Binding("c", "clear_ticks", "Clear ticks", show=False),
+        Binding("d", "toggle_danger", "Danger mode", key_display="D"),
+        Binding("k", "kill", "Kill", show=False, key_display="K"),
+        Binding("c", "clear_ticks", "Clear ticks", show=False, key_display="C"),
     ]
 
     def __init__(self, focus_user: str, interval: int = 5, demo: bool = False, theme: str = "textual-dark", mode: str = "global"):
@@ -253,7 +254,9 @@ class ScoposApp(App):
             cleared += len(table.selected)
             table.clear_selection()
         if cleared:
-            self.notify(f"Cleared {cleared} selection(s)", timeout=2)
+            self.notify(f"Cleared {cleared} selection(s)", title="CLEAR", timeout=2)
+        else:
+            self.notify("No selection to clear", title="CLEAR", timeout=2)
 
     def action_toggle_danger(self):
         """Arm/disarm right-click process killing (still confirmed per-kill)."""
