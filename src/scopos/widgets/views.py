@@ -12,7 +12,8 @@ from typing import (Dict, List, Tuple)
 
 from .. import (__version__, __author__)
 from ..monitor import (Monitor, ProcInfo, TmuxPane, TmuxSession)
-from .grid import (ProcTable, columns_with_meta)
+from .columns import columns_with_meta
+from .proc_table import ProcTable
 
 
 class TmuxView(Vertical):

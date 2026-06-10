@@ -4,6 +4,7 @@
 from __future__ import annotations
 import os
 import time
+from collections import Counter
 from rich.text import Text
 from textual import work
 from textual.binding import Binding
@@ -14,7 +15,9 @@ from typing import (Dict, List, Optional)
 
 from . import config
 from .monitor import (CPUInfo, GPUInfo, Monitor, DemoMonitor)
-from .widgets.grid import (GpuCard, CpuCard, ProcTable)
+from .widgets.cards import (GpuCard, CpuCard)
+from .widgets.proc_table import ProcTable
+from .widgets.dialogs import confirm_and_kill
 from .widgets.others import (Clock, Logo, SysMeter, CPUMeter)
 from .widgets.views import (InfoView, TmuxView)
 
@@ -122,6 +125,9 @@ class ScoposApp(App):
     # How often (seconds) indeterminate progress bars advance a frame.
     ANIM_INTERVAL = 0.25
 
+    # Some footer "buttons" relabel by pairing two same-key bindings and showing
+    # exactly one via ``check_action`` (False = hidden). kill/clear are shown
+    # only while danger mode is armed, and sit right after the Danger button.
     BINDINGS = [
         Binding("q,escape", "quit", "Quit", key_display="Q"),
         Binding("r", "refresh", "Refresh Now", key_display="R"),
@@ -130,13 +136,34 @@ class ScoposApp(App):
         Binding("z", "zen_mode", "Zen Mode", show=False),
         Binding("t", "tmux_mode", "Tmux Mode", show=False),
         Binding("i", "info", "Info", show=False),
-        Binding("h", "toggle_dark", "Theme Light", key_display="H"),
-        # Deliberately awkward so it isn't hit by accident: it arms right-click
-        # process killing. Confirmed again per-kill by a dialog.
-        Binding("d", "toggle_danger", "Danger mode", key_display="D"),
-        Binding("k", "kill", "Kill", show=False, key_display="K"),
-        Binding("c", "clear_ticks", "Clear ticks", show=False, key_display="C"),
+        Binding("h", "theme_light", "Theme Light", key_display="H"),  # shown when dark
+        Binding("h", "theme_dark", "Theme Dark", key_display="H"),    # shown when light
+        Binding("d", "arm_danger", "Danger Mode", key_display="D"),   # shown when safe
+        Binding("d", "disarm_danger", "Safe Mode", key_display="D"),  # shown when danger
+        Binding("k", "kill", "Kill Selected", key_display="K"),       # shown when danger
+        Binding("c", "clear_ticks", "Clear Ticks", key_display="C"),  # shown when danger
     ]
+
+    DARK_THEME = "textual-dark"
+    LIGHT_THEME = "textual-light"
+
+    def check_action(self, action: str, parameters):
+        """Footer visibility: relabel theme/danger and reveal kill/clear in danger.
+
+        ``False`` hides a binding (and blocks its key); ``True`` shows it.
+        """
+        dark = self.theme != self.LIGHT_THEME
+        if action == "theme_light":
+            return dark or False
+        if action == "theme_dark":
+            return (not dark) or False
+        if action == "arm_danger":
+            return (not self.danger) or False
+        if action == "disarm_danger":
+            return self.danger or False
+        if action in ("kill", "clear_ticks"):
+            return self.danger or False
+        return True
 
     def __init__(self, focus_user: str, interval: int = 5, demo: bool = False, theme: str = "textual-dark", mode: str = "global"):
         super().__init__()
@@ -156,6 +183,7 @@ class ScoposApp(App):
         self._gpu_cards: Dict[int, GpuCard] = {}
         self._cpu_card: Optional[CpuCard] = None
         self._frame: int = 0
+        self._status_main: str = ""  # mode-specific status text, sans danger/selection
         self.theme = theme
 
     def compose(self) -> ComposeResult:
@@ -247,28 +275,58 @@ class ScoposApp(App):
             self.query_one("#switcher", ContentSwitcher).current = TABS_INFO[mode][1]
             self.refresh_data()
 
+    # -- theme (relabels Light/Dark in the footer) -------------------------
+    def action_theme_light(self):
+        self.theme = self.LIGHT_THEME
+        self.refresh_bindings()
+
+    def action_theme_dark(self):
+        self.theme = self.DARK_THEME
+        self.refresh_bindings()
+
+    # -- danger / selection ------------------------------------------------
+    def action_arm_danger(self):
+        self._set_danger(True)
+
+    def action_disarm_danger(self):
+        self._set_danger(False)
+
+    def _set_danger(self, on: bool):
+        """Arm/disarm kill mode. Leaving it clears every batch selection."""
+        self.danger = on
+        if not on:
+            for table in self.query(ProcTable):
+                table.clear_selection()
+        self.refresh_bindings()  # relabel Danger/Safe + show/hide kill & clear
+        self.refresh_data()      # checkboxes appear/disappear
+        self.notify(
+            "Danger Mode ON\nTick rows or right-click a process to kill (confirmation required)."
+            if on else "Safe Mode — selections cleared",
+            title="⚠ DANGER" if on else "SAFE",
+            severity="warning" if on else "information",
+            timeout=5,
+        )
+
     def action_clear_ticks(self):
         """Uncheck every batch-selected row across all tables."""
-        cleared = 0
+        cleared = sum(len(t.selected) for t in self.query(ProcTable))
         for table in self.query(ProcTable):
-            cleared += len(table.selected)
             table.clear_selection()
-        if cleared:
-            self.notify(f"Cleared {cleared} selection(s)", title="CLEAR", timeout=2)
-        else:
-            self.notify("No selection to clear", title="CLEAR", timeout=2)
+        self.notify(f"Cleared {cleared} selection(s)" if cleared else "No selection to clear",
+                    title="CLEAR", timeout=2)
 
-    def action_toggle_danger(self):
-        """Arm/disarm right-click process killing (still confirmed per-kill)."""
-        self.danger = not self.danger
+    def action_kill(self):
+        """Kill every ticked process (across all tables) in one confirmation."""
+        procs = [p for t in self.query(ProcTable) for p in t.selected_procs()]
+        if not procs:
+            self.notify("No processes selected", title="KILL", timeout=2)
+            return
+        confirm_and_kill(self, procs, scope="selected", after=self._after_global_kill)
+
+    def _after_global_kill(self, procs):
+        for table in self.query(ProcTable):
+            table.clear_selection()
         self.refresh_data()
-        self.notify(
-            "Danger Mode ON\nRight-click a process to kill it (confirmation required)."
-            if self.danger else "Danger Mode OFF",
-            title="⚠ DANGER" if self.danger else "SAFE",
-            severity="warning" if self.danger else "information",
-            timeout=6,
-        )
 
     # -- data --------------------------------------------------------------
     # Collection (NVML / psutil / tmux) is blocking, so it runs in a thread
@@ -390,14 +448,34 @@ class ScoposApp(App):
         self._cpu_card.set_danger(self.danger)
         self._cpu_card.update(cpu)
 
-    def _set_status(self, main: str):
+    def _set_status(self, main: Optional[str] = None):
+        if main is not None:
+            self._status_main = main
         text = Text(
-            f"{main}  ·  {self.mode}  ·  press m for {self._next_mode()} mode",
+            f"{self._status_main}  ·  {self.mode}  ·  press m for {self._next_mode()} mode",
             style="dim",
         )
         if self.danger:
-            text.append("  ·  ⚠ DANGER (right-click to kill)", style="bold red")
+            text.append("  ·  ⚠ DANGER (tick rows, then k)", style="bold red")
+        sel = self._selection_summary()
+        if sel:
+            text.append(sel, style="bold yellow")
         self.query_one("#status", Static).update(text)
+
+    def refresh_selection_status(self):
+        """Re-render the status bar after a tick change (keeps the same main text)."""
+        self._set_status()
+
+    def _selection_summary(self) -> str:
+        """``✓ N selected (alice:2, bob:1)`` — totals, broken down by user."""
+        counts: Counter = Counter()
+        for table in self.query(ProcTable):
+            counts.update(table.selected_by_user())
+        total = sum(counts.values())
+        if not total:
+            return ""
+        by_user = ", ".join(f"{u}:{n}" for u, n in sorted(counts.items()))
+        return f"  ·  ✓ {total} selected ({by_user})"
 
     def on_unmount(self):
         self.monitor.pn_stop()

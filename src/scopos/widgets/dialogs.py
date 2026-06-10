@@ -1,8 +1,10 @@
 # -*- coding: utf-8 -*-
-"""Pop-over dialogs for Scopos: a right-click context menu and a confirm box."""
+"""Pop-over dialogs for Scopos: a right-click context menu and a confirm box,
+plus the shared "confirm then terminate" helper used by every kill path."""
 
 from __future__ import annotations
-from typing import (List, Optional, Tuple)
+import psutil
+from typing import (Callable, List, Optional, Tuple)
 
 from textual import events
 from textual.app import ComposeResult
@@ -114,3 +116,56 @@ class ConfirmScreen(ModalScreen[bool]):
 
     def action_cancel(self) -> None:
         self.dismiss(False)
+
+
+def _clip(text: str, width: int) -> str:
+    return text if len(text) <= width else text[: max(1, width - 1)] + "…"
+
+
+def terminate_procs(procs) -> Tuple[int, int]:
+    """Send SIGTERM to each process; return (killed, failed)."""
+    killed = failed = 0
+    for proc in sorted(procs, key=lambda p: p.pid, reverse=True):
+        try:
+            psutil.Process(proc.pid).terminate()
+            killed += 1
+        except psutil.NoSuchProcess:
+            killed += 1
+        except Exception:
+            failed += 1
+    return killed, failed
+
+
+def confirm_and_kill(app, procs, *, scope: str, detail: Optional[str] = None,
+                     after: Optional[Callable] = None) -> None:
+    """Confirm a (possibly multi-process) kill, then terminate on approval.
+
+    Shared by the table right-click menu and the footer Kill button so the kill
+    flow lives in exactly one place. ``detail`` is the full per-field info shown
+    for a single process; multi-process kills always list every target.
+    """
+    procs = list(procs)
+    if not procs:
+        app.notify("Nothing to kill", timeout=2)
+        return
+    if len(procs) == 1 and detail:
+        msg = "⚠ Kill this process?\nThis sends a terminate signal and cannot be undone.\n\n" + detail
+        label = "Kill"
+    else:
+        listing = "\n".join(f"  • {p.pid:>7}  {_clip(p.cmd or p.pname, 60)}" for p in procs)
+        msg = (f"⚠ Multi-process kill — {scope} ({len(procs)} processes).\n"
+               "ALL of them will be sent a terminate signal (cannot be undone):\n\n" + listing)
+        label = f"Kill {len(procs)}"
+
+    def on_confirm(ok: bool, targets=procs):
+        if not ok:
+            return
+        killed, failed = terminate_procs(targets)
+        if failed:
+            app.notify(f"Killed {killed}, failed {failed} (permission?)", severity="error")
+        else:
+            app.notify(f"Sent terminate signal to {killed} process(es)")
+        if after is not None:
+            after(targets)
+
+    app.push_screen(ConfirmScreen(msg, confirm_label=label), on_confirm)
