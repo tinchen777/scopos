@@ -57,10 +57,21 @@ class DeviceInfo:
 
 @dataclass
 class CPUInfo(DeviceInfo):
-    """A snapshot of one CPU and the processes running on it."""
+    """A snapshot of the host CPU side: the focus user's non-GPU processes."""
 
-    rss_used: int
     user_rsss: Dict[str, int] = field(default_factory=dict, init=False)
+
+    @property
+    def rss_used(self) -> int:
+        return sum(self.user_rsss.values())
+
+    @classmethod
+    def from_procs(cls, procs: List[ProcInfo]) -> "CPUInfo":
+        cpu = cls(name="CPU")
+        for proc in procs:
+            cpu.procs.append(proc)
+            cpu.user_rsss[proc.user] = cpu.user_rsss.get(proc.user, 0) + proc.rss
+        return cpu
 
 
 @dataclass
@@ -79,11 +90,9 @@ class GPUInfo(DeviceInfo):
     def used_rate(self) -> float:
         return self.mem_used / self.mem_total if self.mem_total else 0.0
 
-    def mvp(self) -> Optional[str]:
-        """Return the user holding the most memory on this GPU, if any."""
-        if not self.user_mems:
-            return None
-        return max(self.user_mems.items(), key=lambda kv: kv[1])[0]
+    @property
+    def idle_rate(self) -> float:
+        return self.mem_free / self.mem_total if self.mem_total else 0.0
 
 
 @dataclass
@@ -186,10 +195,10 @@ class Monitor:
     # -- GPU ---------------------------------------------------------------
     def collect_GPU(self) -> Tuple[List[GPUInfo], Dict[str, List[ProcInfo]]]:
         self.pn_start()
-        # FIXME
-        self._tmux_panes = self._tmux_pane_map()
+        # Pane->session map lets _build_proc name tmux processes' SESSION column.
+        self._tmux_panes = {pane_pid: sname for sname, *_rest, pane_pid in self._list_panes()}
         gpus: List[GPUInfo] = []
-        user_procs = {self.focus_user: []}
+        user_procs: Dict[str, List[ProcInfo]] = {self.focus_user: []}
 
         for gpu_id in range(pn.nvmlDeviceGetCount()):
             handle = pn.nvmlDeviceGetHandleByIndex(gpu_id)
@@ -224,9 +233,7 @@ class Monitor:
 
             gpus.append(gpu)
 
-        self._assign_numbers(user_procs)
-        self._annotate_eta(user_procs[self.focus_user])
-
+        self._finalize([p for procs in user_procs.values() for p in procs])
         return gpus, user_procs
 
     # -- CPU ---------------------------------------------------------------
@@ -239,24 +246,15 @@ class Monitor:
         Filtered to the watched user (when set) and to live processes that are
         not already listed on a GPU.
         """
-        cpu = CPUInfo(name="CPU", rss_used=0)
-
+        procs: List[ProcInfo] = []
         for pid in fetch_pids():
             if pid in gpu_pids:
                 continue
             proc = self._build_proc(_HostProc(pid))
-            if proc is None:
-                continue
-            # if not proc.meta:  # only show processes that actually reported something
-            #     continue
-            cpu.procs.append(proc)
-            cpu.user_rsss.setdefault(proc.user, 0)
-            cpu.user_rsss[proc.user] += proc.rss
-            cpu.rss_used += proc.rss
-        self._annotate_eta(cpu.procs)
-        self._assign_numbers({self.focus_user: cpu.procs})
-
-        return cpu
+            if proc is not None:
+                procs.append(proc)
+        self._finalize(procs)
+        return CPUInfo.from_procs(procs)
 
     # -- utils -------------------------------------------------------------
     def _annotate_eta(self, procs: List[ProcInfo]):
@@ -300,28 +298,22 @@ class Monitor:
         for hkey in [k for k, v in self._prog_hist.items() if v[2] < cutoff]:
             del self._prog_hist[hkey]
 
-    def _assign_numbers(self, user_procs: Dict[str, List[ProcInfo]]):
-        """Fill in each process's "parentNo-childNo" label.
+    def _finalize(self, procs: List[ProcInfo]):
+        """Common post-collection pass shared by every ``collect_*``."""
+        self._assign_numbers(procs)
+        self._annotate_eta(procs)
 
-        Numbering is per user and spans every GPU: a user's parent processes
-        are numbered in the order they are first seen across all GPUs, and the
-        child counter increments for every process sharing that parent.
-        """
-        for _, procs in user_procs.items():
-            count = 1
-            for proc in procs:
-                proc.number = f"{count:02d}"
-                count += 1
+    @staticmethod
+    def _assign_numbers(procs: List[ProcInfo]):
+        """Number each user's processes 01, 02, … in the order they're seen."""
+        counts: Dict[str, int] = {}
+        for proc in procs:
+            counts[proc.user] = counts.get(proc.user, 0) + 1
+            proc.number = f"{counts[proc.user]:02d}"
 
-    def _build_proc(self, process) -> Optional[ProcInfo]:
-        # pid
-        try:
-            pid = int(process.pid)
-            p = psutil.Process(pid)
-        except Exception:
-            return None
-        # Batch the per-process reads below into a single pass where the OS
-        # supports it; cheaper than fetching each attribute on its own.
+    @staticmethod
+    def _read_proc_basics(p) -> Tuple[str, str, str, int, int]:
+        """``(name, user, cmd, runtime_sec, rss)`` in one psutil ``oneshot`` pass."""
         try:
             ctx = p.oneshot()
         except Exception:
@@ -341,9 +333,19 @@ class Monitor:
             except Exception:
                 runtime_sec = 0
             try:
-                rss = int(p.memory_info().rss)  # host (CPU) memory
+                rss = int(p.memory_info().rss)
             except Exception:
                 rss = 0
+        return name, user, cmd or name, runtime_sec, rss
+
+    def _build_proc(self, process) -> Optional[ProcInfo]:
+        # pid
+        try:
+            pid = int(process.pid)
+            p = psutil.Process(pid)
+        except Exception:
+            return None
+        name, user, cmd, runtime_sec, rss = self._read_proc_basics(p)
         self.color_for(user)
         mem = int(process.usedGpuMemory or 0)  # GPU memory (0 for non-GPU procs)
         runtime = fmt_duration(runtime_sec)
@@ -391,30 +393,41 @@ class Monitor:
 
     # -- tmux --------------------------------------------------------------
     @staticmethod
-    def _tmux_pane_map() -> Dict[int, str]:
-        """Map each tmux pane's shell PID to its session name.
+    def _list_panes() -> List[Tuple[str, bool, int, str, int, int]]:
+        """One ``tmux list-panes`` call → rows of
+        ``(session, attached, window_idx, window_name, pane_idx, pane_pid)``.
 
         Only the *running user's* tmux server is reachable (its socket lives in
-        a per-user, 0700 directory), so panes belonging to other users can't be
-        named and fall back to a plain "tmux".  Returns ``{}`` when tmux is not
-        installed or no server is running.
+        a per-user, 0700 directory). Returns ``[]`` when tmux isn't installed or
+        no server is running. This is the single source for both the SESSION
+        column's pane→session map and the tmux page.
         """
+        sep = "\t"
+        fmt = sep.join((
+            "#{session_name}", "#{session_attached}", "#{window_index}",
+            "#{window_name}", "#{pane_index}", "#{pane_pid}",
+        ))
         try:
             out = subprocess.run(
-                ["tmux", "list-panes", "-a", "-F", "#{pane_pid} #{session_name}"],
+                ["tmux", "list-panes", "-a", "-F", fmt],
                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                timeout=1, check=False,
+                timeout=2, check=False,
             )
         except Exception:
-            return {}
-        mapping: Dict[int, str] = {}
+            return []
+        rows: List[Tuple[str, bool, int, str, int, int]] = []
         for line in out.stdout.decode("utf-8", "replace").splitlines():
-            head, _, name = line.partition(" ")
+            parts = line.split(sep)
+            if len(parts) != 6:
+                continue
+            sname, attached, widx, wname, pidx, ppid = parts
             try:
-                mapping[int(head)] = name.strip()
+                pane_pid = int(ppid)
             except ValueError:
-                pass
-        return mapping
+                continue
+            rows.append((sname, attached.strip() not in ("", "0"),
+                         _to_int(widx), wname, _to_int(pidx), pane_pid))
+        return rows
 
     def _tmux_session_for(self, chain) -> Optional[Tuple[int, str]]:
         """Find the tmux pane owning a process, given its ancestor chain.
@@ -453,63 +466,44 @@ class Monitor:
         per-user directory), so this shows *your own* tmux. Returns ``[]`` when
         tmux isn't installed or no server is running. (No GPU/NVML needed.)
         """
-        sep = "\t"
-        fmt = sep.join((
-            "#{session_name}", "#{session_attached}", "#{window_index}",
-            "#{window_name}", "#{pane_index}", "#{pane_pid}",
-        ))
-        try:
-            out = subprocess.run(
-                ["tmux", "list-panes", "-a", "-F", fmt],
-                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                timeout=2, check=False,
-            )
-        except Exception:
+        rows = self._list_panes()
+        if not rows:
             return []
+        # One process-table snapshot for the whole tree, so we never pay the
+        # per-pane cost of psutil's children() (which rescans every process).
+        children = _children_map()
         sessions: Dict[str, TmuxSession] = {}
-        for line in out.stdout.decode("utf-8", "replace").splitlines():
-            parts = line.split(sep)
-            if len(parts) != 6:
-                continue
-            sname, attached, widx, wname, pidx, ppid = parts
-            try:
-                pane_pid = int(ppid)
-            except ValueError:
-                continue
-            is_attached = attached.strip() not in ("", "0")
+        for sname, attached, widx, wname, pidx, pane_pid in rows:
             session = sessions.get(sname)
             if session is None:
-                session = TmuxSession(name=sname, attached=is_attached)
+                session = TmuxSession(name=sname, attached=attached)
                 sessions[sname] = session
             pane = TmuxPane(
-                session=sname, attached=is_attached,
-                window_idx=_to_int(widx), window_name=wname,
-                pane_idx=_to_int(pidx), pane_pid=pane_pid,
+                session=sname, attached=attached, window_idx=widx,
+                window_name=wname, pane_idx=pidx, pane_pid=pane_pid,
             )
-            pane.procs = self._pane_procs(pane)
+            pane.procs = self._pane_procs(pane, children)
             session.panes.append(pane)
-        all_procs = [p for s in sessions.values() for p in s.all_procs]
-        # bug
-        self._assign_numbers(all_procs)
-        self._annotate_eta(all_procs)
+        self._finalize([p for s in sessions.values() for p in s.all_procs])
         return list(sessions.values())
 
-    def _pane_procs(self, pane: TmuxPane) -> List[ProcInfo]:
+    def _pane_procs(self, pane: TmuxPane, children: Dict[int, List[int]]) -> List[ProcInfo]:
         """A pane's shell (``procs[0]``) plus its *direct* children (the running
-        programs).  Only depth-1 children are walked — cheap, and enough to show
-        what's actually running — and we skip the parent-chain/tmux resolution
-        in ``_build_proc`` since the session is already known here.
+        programs), using a prebuilt ``ppid -> [pid]`` map so there's no per-pane
+        process scan. The session is already known, so no parent-chain walk.
         """
-        try:
-            root = psutil.Process(pane.pane_pid)
-            members = [root] + root.children(recursive=False)
-            s_start_ts = root.create_time()
-        except Exception:
-            return []
         sname = f"{pane.session}:{pane.window_idx}.{pane.pane_idx}"
         procs: List[ProcInfo] = []
-        for member in members:
-            proc = self._build_tmux_proc(member, pane.pane_pid, sname, s_start_ts)
+        try:
+            s_start_ts = psutil.Process(pane.pane_pid).create_time()
+        except Exception:
+            s_start_ts = time.time()
+        for pid in [pane.pane_pid] + children.get(pane.pane_pid, []):
+            try:
+                p = psutil.Process(pid)
+            except Exception:
+                continue
+            proc = self._build_tmux_proc(p, pane.pane_pid, sname, s_start_ts)
             if proc is not None:
                 procs.append(proc)
         return procs
@@ -518,31 +512,14 @@ class Monitor:
         """A fast ProcInfo for a tmux process: session is known, so no chain walk."""
         try:
             pid = p.pid
-            with p.oneshot():
-                name = p.name()
-                try:
-                    user = p.username()
-                except Exception:
-                    user = "?"
-                try:
-                    cmd = " ".join(p.cmdline()).strip()
-                except Exception:
-                    cmd = name
-                try:
-                    runtime_sec = int(time.time() - p.create_time())
-                except Exception:
-                    runtime_sec = 0
-                try:
-                    rss = int(p.memory_info().rss)
-                except Exception:
-                    rss = 0
+            name, user, cmd, runtime_sec, rss = self._read_proc_basics(p)
         except Exception:
             return None
         self.color_for(user)
         s_start = time.strftime("%y-%m-%d %H:%M:%S", time.localtime(s_start_ts))
         return ProcInfo(
             pid=pid, pname=name, user=user, mem=0, runtime=fmt_duration(runtime_sec),
-            cmd=cmd or name, runtime_sec=runtime_sec, sid=sid, sname=sname,
+            cmd=cmd, runtime_sec=runtime_sec, sid=sid, sname=sname,
             s_start=s_start, s_start_ts=s_start_ts, rss=rss, meta=read_fields(pid),
         )
 
@@ -667,6 +644,7 @@ class DemoMonitor(Monitor):
             gpus.append(GPUInfo(
                 id=gpu_id, name=self.GPU_NAMES[gpu_id], mem_used=0, mem_total=total, mem_free=total, mem_util=rng.randint(0, 100), temperature=rng.randint(35, 85),
             ))
+        user_procs: Dict[str, List[ProcInfo]] = {self.focus_user: []}
         for job in self._jobs:
             if job["gpu"] is None:
                 continue
@@ -674,31 +652,25 @@ class DemoMonitor(Monitor):
             proc = self._job_proc(job)
             gpu.procs.append(proc)
             gpu.user_mems[proc.user] = gpu.user_mems.get(proc.user, 0) + proc.mem
+            user_procs.setdefault(proc.user, []).append(proc)
         for gpu in gpus:
             used = min(sum(p.mem for p in gpu.procs), gpu.mem_total)
             gpu.mem_used = used
             gpu.mem_free = gpu.mem_total - used
-        gpu_procs = [p for g in gpus for p in g.procs]
-        self._assign_numbers(gpu_procs)
-        self._annotate_eta(gpu_procs)
-
-        return gpus, gpu_procs
+        self._finalize([p for procs in user_procs.values() for p in procs])
+        return gpus, user_procs
 
     def collect_CPU(self, gpu_pids: set) -> CPUInfo:
         """The watched user's CPU-only (never-on-GPU) reporting jobs."""
         self._ensure_jobs()
         assert self._jobs is not None
         user = self.focus_user or "frank"
-        cpu_procs = [
+        procs = [
             self._job_proc(job) for job in self._jobs
             if job["gpu"] is None and job["user"] == user
         ]
-        cpu = CPUInfo(name="CPU")
-        cpu.procs = cpu_procs
-        self._assign_numbers(cpu_procs)
-        self._annotate_eta(cpu_procs)
-
-        return cpu
+        self._finalize(procs)
+        return CPUInfo.from_procs(procs)
 
     def gpu_specs(self) -> List[Tuple[int, str, int]]:
         return [(i, name, self.GPU_TOTAL_GB[i] * 1024 ** 3) for i, name in enumerate(self.GPU_NAMES)]
@@ -738,10 +710,23 @@ class DemoMonitor(Monitor):
                 ))
                 pane_pid += 1
             sessions.append(session)
-        all_procs = [p for s in sessions for p in s.all_procs]
-        self._assign_numbers(all_procs)
-        self._annotate_eta(all_procs)
+        self._finalize([p for s in sessions for p in s.all_procs])
         return sessions
+
+
+def _children_map() -> Dict[int, List[int]]:
+    """One process scan → ``ppid -> [child pid]``.
+
+    A cheap alternative to calling ``psutil.Process.children()`` per pane (each
+    of those rescans every process), which is what made the tmux page laggy.
+    """
+    out: Dict[int, List[int]] = {}
+    for p in psutil.process_iter(["pid", "ppid"]):
+        try:
+            out.setdefault(p.info["ppid"], []).append(p.info["pid"])
+        except Exception:
+            continue
+    return out
 
 
 def _decode(value) -> str:

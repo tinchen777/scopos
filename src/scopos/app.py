@@ -4,8 +4,8 @@
 from __future__ import annotations
 import os
 import time
-import psutil
 from rich.text import Text
+from textual import work
 from textual.binding import Binding
 from textual.app import (App, ComposeResult)
 from textual.containers import (Container, Horizontal, VerticalScroll)
@@ -156,10 +156,6 @@ class ScoposApp(App):
         self._cpu_card: Optional[CpuCard] = None
         self._frame: int = 0
         self.theme = theme
-        # scopos's own process, for the self-usage readout in the status bar.
-        # FIXME
-        self._self_proc = psutil.Process(os.getpid())
-        self._self_proc.cpu_percent()
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="topbar"):
@@ -272,25 +268,39 @@ class ScoposApp(App):
         )
 
     # -- data --------------------------------------------------------------
+    # Collection (NVML / psutil / tmux) is blocking, so it runs in a thread
+    # worker and the result is applied back on the UI thread. ``exclusive`` +
+    # a shared group means switching tabs cancels an in-flight collect, so the
+    # UI never stalls (it just keeps the old data until the new data arrives).
     def refresh_data(self):
-        # Only refresh whatever the active tab is showing.
         if self.mode in ("global", "zen"):
-            self._refresh_grid()
+            self._collect_grid()
         elif self.mode == "tmux":
-            self._refresh_tmux()
+            self._collect_tmux()
         elif self.mode == "info":
-            self._refresh_info()
-        # The on-screen time reflects when this data was collected.
-        try:
-            self.query_one(Clock).show_time(time.time())
-        except Exception:
-            pass
+            # Cheap, main-thread-only psutil reads; no worker needed.
+            self.query_one("#info", InfoView).update()
+            self._set_status("info  ·  scopos & host overview")
+            self._stamp_clock()
 
-    def _refresh_grid(self):
-        gpus, user_procs = self.monitor.collect_GPU()
+    @work(thread=True, exclusive=True, group="collect")
+    def _collect_grid(self):
+        mode = self.mode
+        try:
+            gpus, user_procs = self.monitor.collect_GPU()
+            cpu = None
+            if mode == "zen":
+                cpu = self.monitor.collect_CPU({p.pid for p in user_procs.get(self.focus_user, [])})
+        except Exception as exc:  # keep the UI alive on transient NVML errors
+            self.call_from_thread(self._set_status, f"collection error: {exc}")
+            return
+        self.call_from_thread(self._apply_grid, mode, gpus, cpu)
+
+    def _apply_grid(self, mode: str, gpus: List[GPUInfo], cpu: Optional[CPUInfo]):
+        if self.mode != mode:  # user switched tabs while we were collecting
+            return
         self._sync_gpu_cards(gpus)
-        if self.mode == "zen":
-            cpu = self.monitor.collect_CPU({p.pid for p in user_procs[self.focus_user]})
+        if mode == "zen" and cpu is not None:
             self._sync_cpu_card(cpu)
             n_cpu_procs = len(cpu.procs)
         else:
@@ -305,9 +315,21 @@ class ScoposApp(App):
             f"{sum(len(g.user_mems) for g in gpus)} user(s)  ·  refresh {self.interval}s  ·  "
             f"{demo_tag}  ·  focus on [{self.focus_user}]"
         )
+        self._stamp_clock()
 
-    def _refresh_tmux(self):
-        sessions = self.monitor.collect_tmux()
+    @work(thread=True, exclusive=True, group="collect")
+    def _collect_tmux(self):
+        mode = self.mode
+        try:
+            sessions = self.monitor.collect_tmux()
+        except Exception as exc:
+            self.call_from_thread(self._set_status, f"collection error: {exc}")
+            return
+        self.call_from_thread(self._apply_tmux, mode, sessions)
+
+    def _apply_tmux(self, mode: str, sessions: list):
+        if self.mode != mode:
+            return
         tmux = self.query_one("#tmux", TmuxView)
         tmux.set_danger(self.danger)
         tmux.update(sessions)
@@ -316,10 +338,14 @@ class ScoposApp(App):
             f"tmux · {len(sessions)} session(s) · {n_proc} proc(s)  ·  "
             f"focus on [{self.focus_user}]  ·  your own tmux server only"
         )
+        self._stamp_clock()
 
-    def _refresh_info(self):
-        self.query_one("#info", InfoView).update()
-        self._set_status("info  ·  scopos & host overview")
+    def _stamp_clock(self):
+        # The on-screen time reflects when this data was collected.
+        try:
+            self.query_one(Clock).show_time(time.time())
+        except Exception:
+            pass
 
     def _sync_gpu_cards(self, gpus: List[GPUInfo]):
         wanted = {g.id for g in gpus}
@@ -361,15 +387,6 @@ class ScoposApp(App):
         self._cpu_card.set_danger(self.danger)
         self._cpu_card.update(cpu)
 
-    def _self_usage(self) -> str:
-        """scopos's own CPU% / RAM, for the status bar."""
-        try:
-            # cpu_percent since the previous call, normalised over all cores.
-            mb = self._self_proc.memory_info().rss / (1024 ** 2)
-            return f"scopos {mb:.0f} MB"
-        except Exception:
-            return "scopos —"
-
     def _set_status(self, main: str):
         text = Text(
             f"{main}  ·  {self.mode}  ·  press m for {self._next_mode()} mode",
@@ -377,7 +394,6 @@ class ScoposApp(App):
         )
         if self.danger:
             text.append("  ·  ⚠ DANGER (right-click to kill)", style="bold red")
-        text.append(f"  ·  {self._self_usage()}", style="dim")
         self.query_one("#status", Static).update(text)
 
     def on_unmount(self):
