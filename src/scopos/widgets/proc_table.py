@@ -14,7 +14,8 @@ from .. import config
 from ..metadata.utils import is_progress
 from ..monitor import (Monitor, ProcInfo)
 from .columns import (
-    CHECK_WIDTH, COLS, REVERSE_KEYS, Column, fit_cell, progress_text, render_progress)
+    CHECK_WIDTH, COLS, REVERSE_KEYS, Column, fit_cell, proc_full_info,
+    progress_text, render_progress)
 from .dialogs import (ContextMenu, confirm_and_kill)
 
 
@@ -38,12 +39,16 @@ class ProcTable(Vertical):
         monitor: Monitor,
         columns_for: Callable[[List[ProcInfo]], List[Column]],
         *,
-        danger: bool = False
+        danger: bool = False,
+        initial_sort: Optional[Tuple[str, bool]] = None
     ):
         super().__init__()
         self.monitor = monitor
         self._columns_for = columns_for
         self.danger = danger
+        # The device behind this table (e.g. the GPUInfo); style callables in
+        # MODE_TUNING read it for things like "fraction of this GPU's memory".
+        self.context: Any = None
         self.table = DataTable(
             zebra_stripes=True,
             cursor_type="row",
@@ -56,8 +61,7 @@ class ProcTable(Vertical):
         self._row_procs: List[ProcInfo] = []
         self._columns: List[Column] = []
         self._anim_cells: List[Tuple[int, int, Dict[str, Any]]] = []
-        self._sort_key: Optional[str] = None
-        self._sort_reverse: bool = False
+        self._sort_key, self._sort_reverse = initial_sort if initial_sort else (None, False)
         self._frame: int = 0
         self._cursor_pid: Optional[int] = None  # row to re-select after refresh
         self._suspend_track = False
@@ -95,12 +99,14 @@ class ProcTable(Vertical):
         *,
         empty_message: str = "— no processes —",
         row_style: Optional[Callable[[ProcInfo], Optional[str]]] = None,
-        extra_menu: Optional[Callable[[ProcInfo], List[Tuple]]] = None
+        extra_menu: Optional[Callable[[ProcInfo], List[Tuple]]] = None,
+        context: Any = None
     ):
         self._procs = list(procs)
         self._empty_message = empty_message
         self._row_style = row_style
         self._extra_menu = extra_menu
+        self.context = context
         self._rebuild()
 
     def animate_progress(self, frame: int):
@@ -258,28 +264,26 @@ class ProcTable(Vertical):
 
     # -- copy / kill -------------------------------------------------------
     def _clean_cell(self, col: Column, proc: ProcInfo) -> str:
+        """Plain text of one cell, for the hover tooltip."""
         if col.meta_key is not None:
             raw = proc.meta.get(col.meta_key)
             if raw is None:
                 return ""
             return progress_text(raw) if is_progress(raw) else str(raw)
-            # TODO
         value = col.render(self, proc)
         return value.plain if isinstance(value, Text) else str(value)
 
-    def _proc_info(self, proc: ProcInfo) -> str:
-        return "\n".join(f"{col.label}: {self._clean_cell(col, proc)}".rstrip()
-                         for col in self._columns)
-
+    # Copy and the kill confirmation use the COMPLETE record (every field plus
+    # all reported metadata), independent of which columns this mode shows.
     def _copy(self, proc: ProcInfo):
         try:
-            self.app.copy_to_clipboard(self._proc_info(proc))
+            self.app.copy_to_clipboard(proc_full_info(proc))
             self.app.notify(f"Copied info for [{proc.pid} - {proc.user}]")
         except Exception as exc:
             self.app.notify(f"Copy failed: {exc}", severity="error")
 
     def _confirm_kill(self, procs: List[ProcInfo], scope: str):
-        detail = self._proc_info(procs[0]) if len(procs) == 1 else None
+        detail = proc_full_info(procs[0]) if len(procs) == 1 else None
         confirm_and_kill(self.app, procs, scope=scope, detail=detail, after=self._after_kill)
 
     def _after_kill(self, procs: List[ProcInfo]):

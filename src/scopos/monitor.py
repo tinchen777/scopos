@@ -215,12 +215,14 @@ class Monitor:
             for gpu_process in gpu_processes:
                 try:
                     process = psutil.Process(gpu_process.pid)
+                    proc = self._build_proc(
+                        process=process,
+                        mem=int(gpu_process.usedGpuMemory or 0)
+                    )
                 except Exception:
+                    # The process vanished mid-collection; skip it rather than
+                    # failing the whole refresh.
                     continue
-                proc = self._build_proc(
-                    process=process,
-                    mem=int(gpu_process.usedGpuMemory or 0)
-                )
 
                 gpu.procs.append(proc)
                 gpu.user_procs.setdefault(proc.user, []).append(proc)
@@ -251,9 +253,9 @@ class Monitor:
                 continue
             try:
                 process = psutil.Process(pid)
+                proc = self._build_proc(process)
             except Exception:
                 continue
-            proc = self._build_proc(process)
             cpu.procs.append(proc)
             cpu.user_rsss[proc.user] = cpu.user_rsss.get(proc.user, 0) + proc.rss
             cpu.user_procs.setdefault(proc.user, []).append(proc)
@@ -468,9 +470,9 @@ class Monitor:
         for pid in [pane_pid] + children.get(pane_pid, []):
             try:
                 process = psutil.Process(pid)
+                proc_info = self._build_proc_basics(process)
             except Exception:
                 continue
-            proc_info = self._build_proc_basics(process)
 
             proc_info.sid = pane_pid
             proc_info.sname = pane.sname
@@ -607,6 +609,7 @@ class DemoMonitor(Monitor):
             pid=job["pid"], pname=job["pname"], user=job["user"],
             mem=job["mem"], runtime=fmt_duration(runtime_sec), cmd=job["cmd"],
             runtime_sec=runtime_sec, sid=job["sid"], sname=job["sname"],
+            s_alias=job["sname"],
             s_start=time.strftime("%y-%m-%d %H:%M:%S", time.localtime(job["start"])),
             s_start_ts=job["start"], rss=job["rss"], meta=self._job_meta(job),
         )
@@ -629,26 +632,32 @@ class DemoMonitor(Monitor):
             gpu = gpus[job["gpu"]]
             proc = self._job_proc(job)
             gpu.procs.append(proc)
+            gpu.user_procs.setdefault(proc.user, []).append(proc)
             gpu.user_mems[proc.user] = gpu.user_mems.get(proc.user, 0) + proc.mem
             user_procs.setdefault(proc.user, []).append(proc)
         for gpu in gpus:
             used = min(sum(p.mem for p in gpu.procs), gpu.mem_total)
             gpu.mem_used = used
             gpu.mem_free = gpu.mem_total - used
-        self._finalize([p for procs in user_procs.values() for p in procs])
-        return gpus, user_procs
+        self._assign_numbers(user_procs)
+        self._annotate_eta(user_procs.get(self.focus_user, []))
+        return gpus, {p.pid for p in user_procs.get(self.focus_user, [])}
 
     def collect_CPU(self, gpu_pids: set) -> CPUInfo:
         """The watched user's CPU-only (never-on-GPU) reporting jobs."""
         self._ensure_jobs()
         assert self._jobs is not None
-        user = self.focus_user or "frank"
-        procs = [
-            self._job_proc(job) for job in self._jobs
-            if job["gpu"] is None and job["user"] == user
-        ]
-        self._finalize(procs)
-        return CPUInfo.from_procs(procs)
+        cpu = CPUInfo(name="CPU")
+        for job in self._jobs:
+            if job["gpu"] is not None or job["user"] != self.focus_user:
+                continue
+            proc = self._job_proc(job)
+            cpu.procs.append(proc)
+            cpu.user_rsss[proc.user] = cpu.user_rsss.get(proc.user, 0) + proc.rss
+            cpu.user_procs.setdefault(proc.user, []).append(proc)
+        self._assign_numbers(cpu.user_procs)
+        self._annotate_eta(cpu.user_procs.get(self.focus_user, []))
+        return cpu
 
     def gpu_specs(self) -> List[Tuple[int, str, int]]:
         return [(i, name, self.GPU_TOTAL_GB[i] * 1024 ** 3) for i, name in enumerate(self.GPU_NAMES)]
@@ -658,7 +667,8 @@ class DemoMonitor(Monitor):
         self._ensure_jobs()
         assert self._jobs is not None
         jobs = list(self._jobs)
-        sessions: List[TmuxSession] = []
+        named_sessions: Dict[str, TmuxSession] = {}
+        all_procs: List[ProcInfo] = []
         # (session, attached, [(win_idx, win_name, has_program)])
         plan = [
             ("main", True, [(0, "train", True), (1, "shell", False)]),
@@ -667,29 +677,33 @@ class DemoMonitor(Monitor):
         pane_pid = 4000
         ji = 0
         for sname, attached, windows in plan:
-            session = TmuxSession(name=sname, attached=attached)
+            session = TmuxSession(name=sname, attached=attached, alias=sname)
+            named_sessions[sname] = session
             for widx, wname, has_program in windows:
-                pane_sname = f"{sname}:{widx}.0"
+                pane = TmuxPane(
+                    sname=sname, attached=attached, window_idx=widx,
+                    window_name=wname, pane_idx=0, pane_pid=pane_pid,
+                )
+                pane.alias = f"{pane.sname}:{pane.window_idx}:{pane.pane_idx}"
                 shell = ProcInfo(
                     pid=pane_pid, pname="zsh", user=self.focus_user, mem=0,
                     runtime="1h 02m", cmd="-zsh", runtime_sec=3720,
-                    sid=pane_pid, sname=pane_sname,
+                    sid=pane_pid, sname=sname, s_alias=pane.alias,
                     s_start="-", s_start_ts=time.time() - 3720, rss=8 * 1024 ** 2,
                 )
-                procs = [shell]
+                pane.procs = [shell]
                 if has_program and jobs:
                     proc = self._job_proc(jobs[ji % len(jobs)])
                     ji += 1
-                    proc.sname = pane_sname
-                    procs.append(proc)
-                session.panes.append(TmuxPane(
-                    sname=sname, attached=attached, window_idx=widx,
-                    window_name=wname, pane_idx=0, pane_pid=pane_pid, procs=procs,
-                ))
+                    proc.sname = sname
+                    proc.s_alias = pane.alias
+                    pane.procs.append(proc)
+                session.panes.append(pane)
+                all_procs.extend(pane.procs)
                 pane_pid += 1
-            sessions.append(session)
-        self._finalize([p for s in sessions for p in s.all_procs])
-        return sessions
+        self._assign_numbers({self.focus_user: all_procs})
+        self._annotate_eta(all_procs)
+        return named_sessions, all_procs
 
 
 def _decode(value) -> str:

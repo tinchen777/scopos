@@ -203,13 +203,17 @@ class ScoposApp(App):
         self.set_interval(self.ANIM_INTERVAL, self._progress_tick)
 
     def _progress_tick(self):
-        if self.mode != "zen":
-            return
         self._frame += 1
-        for gpu_card in self._gpu_cards.values():
-            gpu_card.proc_table.animate_progress(self._frame)
-        if self._cpu_card is not None:
-            self._cpu_card.proc_table.animate_progress(self._frame)
+        if self.mode == "zen":
+            for gpu_card in self._gpu_cards.values():
+                gpu_card.proc_table.animate_progress(self._frame)
+            if self._cpu_card is not None:
+                self._cpu_card.proc_table.animate_progress(self._frame)
+        elif self.mode == "tmux":
+            try:
+                self.query_one("#tmux", TmuxView).animate_progress(self._frame)
+            except Exception:
+                pass
 
     def on_resize(self):
         self._relayout_columns()

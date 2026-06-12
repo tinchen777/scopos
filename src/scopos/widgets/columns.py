@@ -9,8 +9,8 @@ the cards build on it without any circular dependency.
 
 from __future__ import annotations
 from rich.text import Text
-from dataclasses import dataclass
-from typing import (Any, Callable, Dict, List, Optional)
+from dataclasses import (dataclass, replace)
+from typing import (Any, Callable, Dict, List, Optional, Tuple, Union)
 
 from .. import config
 from ..metadata.utils import is_progress
@@ -153,17 +153,117 @@ COLS: Dict[str, Column] = {
     "COMMAND": Column(key="COMMAND", label="COMMAND", sort=lambda p: p.cmd.lower(),
                       render=lambda _, p: p.cmd, width=_w("COMMAND"))
 }
-# global mode
-GLOBAL_COLUMNS: List[Column] = list(COLS.values())
-# zen mode
-ZEN_KEYS = ("PID", "NO.", "MEM/GB", "RAM/GB", "RUNTIME", "SESSION")
-ZEN_COLUMNS: List[Column] = [COLS[k] for k in ZEN_KEYS if _is_visible(k)]
-# The CPU card / tmux page are like zen but have no GPU memory column.
-CPU_KEYS = ("PID", "NO.", "RAM/GB", "RUNTIME", "SESSION")
-CPU_COLUMNS: List[Column] = [COLS[k] for k in CPU_KEYS if _is_visible(k)]
-# tmux mode
-TMUX_KEYS = ("SESSION", "PID", "RAM/GB", "RUNTIME")
-TMUX_COLUMNS: List[Column] = [COLS[k] for k in TMUX_KEYS if _is_visible(k)]
+
+
+# ===========================================================================
+# PER-MODE COLUMN TUNING — edit this block to restyle/resize columns per mode.
+#
+# ``MODE_TUNING[mode][column key]`` accepts any of:
+#   "width":  int                                  — width for that mode only
+#                                                    (falls back to config.COLUMN_WIDTHS)
+#   "style":  str | (table, proc) -> Optional[str] — extra Rich style stacked on
+#                                                    the rendered cell
+#   "render": (table, proc) -> str|Text            — replace the cell renderer
+#
+# Style/render callables get the owning ProcTable: ``table.context`` is the
+# DeviceInfo behind the table (the GPUInfo for a GPU card), ``table.monitor``
+# the Monitor.
+# ===========================================================================
+
+# A MEM/GB cell is "heavy" above this fraction of its GPU's total memory.
+MEM_HEAVY_FRACTION = 0.15
+
+
+def _mem_emphasis(table: Any, proc: ProcInfo) -> str:
+    """Global mode MEM/GB: always bold; underline the heavy hitters."""
+    total = getattr(table.context, "mem_total", 0)
+    if total and proc.mem > MEM_HEAVY_FRACTION * total:
+        return "bold underline"
+    return "bold"
+
+
+def _tmux_session_cell(table: Any, proc: ProcInfo) -> Text:
+    """Tmux SESSION cells as right-aligned ``name:W.P``.
+
+    The window/pane numbers keep their (usually 1-digit) value at the right
+    edge so they line up; a long session name is clipped with an ellipsis.
+    """
+    width = mode_width("tmux", "SESSION")
+    try:
+        name, widx, pidx = proc.s_alias.rsplit(":", 2)
+    except ValueError:
+        return Text(proc.s_alias)
+    suffix = f":{widx}.{pidx}"
+    room = (width or len(proc.s_alias)) - len(suffix)
+    if room > 0 and len(name) > room:
+        name = name[: max(1, room - 1)] + "…"
+    cell = f"{name}{suffix}"
+    return Text(cell.rjust(width) if width else cell, no_wrap=True)
+
+
+MODE_TUNING: Dict[str, Dict[str, Dict[str, Any]]] = {
+    "global": {
+        "MEM/GB": {"style": _mem_emphasis},
+    },
+    "zen": {},
+    "cpu": {},
+    "tmux": {
+        "SESSION": {"width": 14, "render": _tmux_session_cell},
+    },
+}
+
+# Which built-in columns each mode shows (before metadata + COMMAND).
+MODE_KEYS: Dict[str, Tuple[str, ...]] = {
+    "global": ("PID", "USER", "NO.", "MEM/GB", "RAM/GB", "RUNTIME", "SESSION", "S.START", "COMMAND"),
+    "zen": ("PID", "NO.", "MEM/GB", "RAM/GB", "RUNTIME", "SESSION"),
+    "cpu": ("PID", "NO.", "RAM/GB", "RUNTIME", "SESSION"),
+    "tmux": ("SESSION", "PID", "RAM/GB", "RUNTIME"),
+}
+# ===========================================================================
+
+
+StyleSpec = Union[str, Callable[[Any, ProcInfo], Optional[str]]]
+
+
+def mode_width(mode: str, key: str) -> Optional[int]:
+    """The effective width of ``key`` in ``mode`` (tuning first, then config)."""
+    width = MODE_TUNING.get(mode, {}).get(key, {}).get("width")
+    return width if width is not None else _w(key)
+
+
+def _styled_render(base: Callable, style: StyleSpec) -> Callable:
+    """Wrap a renderer so the (possibly conditional) style is stacked on top."""
+    def render(table: Any, proc: ProcInfo) -> Any:
+        cell = base(table, proc)
+        s = style(table, proc) if callable(style) else style
+        if s:
+            cell = cell.copy() if isinstance(cell, Text) else Text(str(cell))
+            cell.stylize(s)
+        return cell
+    return render
+
+
+def _tuned_column(mode: str, key: str) -> Column:
+    """``COLS[key]`` with the mode's width/style/render overrides applied."""
+    base = COLS[key]
+    t = MODE_TUNING.get(mode, {}).get(key, {})
+    render = t.get("render", base.render)
+    style = t.get("style")
+    if style is not None:
+        render = _styled_render(render, style)
+    return replace(base, width=mode_width(mode, key), render=render)
+
+
+def mode_columns(mode: str) -> List[Column]:
+    """Build a mode's column list with its per-mode width/style/render applied."""
+    cols = [_tuned_column(mode, key) for key in MODE_KEYS[mode] if _is_visible(key)]
+    return cols or [COLS["PID"]]
+
+
+GLOBAL_COLUMNS: List[Column] = mode_columns("global")
+ZEN_COLUMNS: List[Column] = mode_columns("zen")
+CPU_COLUMNS: List[Column] = mode_columns("cpu")
+TMUX_COLUMNS: List[Column] = mode_columns("tmux")
 
 # Columns that read most naturally largest-first on the initial click.
 REVERSE_KEYS = {"PID", "MEM/GB", "RAM/GB", "RUNTIME", "S.START"}
@@ -184,8 +284,37 @@ def meta_column(key: str) -> Column:
                   render=render, meta_key=key)
 
 
-def columns_with_meta(fixed_cols: List[Column], procs: List[ProcInfo]) -> List[Column]:
-    """Fixed columns + one column per reported field (first-seen order) + COMMAND."""
+def columns_with_meta(fixed_cols: List[Column], procs: List[ProcInfo],
+                      mode: Optional[str] = None) -> List[Column]:
+    """Fixed columns + one column per reported field (first-seen order) + COMMAND.
+
+    Pass ``mode`` so the trailing COMMAND column picks up that mode's tuning.
+    """
     meta_keys = list(dict.fromkeys(key for proc in procs for key in proc.meta))
-    tail = [COLS["COMMAND"]] if _is_visible("COMMAND") else []
+    tail: List[Column] = []
+    if _is_visible("COMMAND"):
+        tail = [_tuned_column(mode, "COMMAND") if mode else COLS["COMMAND"]]
     return (fixed_cols + [meta_column(k) for k in meta_keys] + tail) or [COLS["PID"]]
+
+
+def proc_full_info(proc: ProcInfo) -> str:
+    """The complete, untruncated details of one process, metadata included.
+
+    Used by "copy info" and the kill confirmation, so what you copy/confirm is
+    the full record — not the column-filtered, width-clipped table view.
+    """
+    lines = [
+        f"PID: {proc.pid}",
+        f"USER: {proc.user}",
+        f"NO.: {proc.number}",
+        f"MEM/GB: {fmt_gb(proc.mem)}",
+        f"RAM/GB: {fmt_gb(proc.rss)}",
+        f"RUNTIME: {proc.runtime}",
+        f"SESSION: {proc.s_alias or proc.sname} (sid {proc.sid})",
+        f"S.START: {proc.s_start}",
+        f"COMMAND: {proc.cmd}",
+    ]
+    for key, value in proc.meta.items():
+        shown = progress_text(value) if is_progress(value) else value
+        lines.append(f"{key.upper()}: {shown}")
+    return "\n".join(lines)

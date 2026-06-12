@@ -4,6 +4,7 @@
 from __future__ import annotations
 import platform
 import psutil
+from dataclasses import replace
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.containers import Vertical
@@ -36,7 +37,10 @@ class TmuxView(Vertical):
         self.monitor = monitor
         self.danger = danger
         self._hint = Static(id="hint")
-        self._table = ProcTable(monitor, self._columns_for, danger=danger)
+        # Default sort on first entering tmux mode: by COMMAND with the actual
+        # programs above the idle pane shells (see _columns_for).
+        self._table = ProcTable(monitor, self._columns_for, danger=danger,
+                                initial_sort=("COMMAND", False))
         self._shell_pids: set = set()
         self._pane_of: Dict[int, TmuxPane] = {}
         self._session_of: Dict[int, TmuxSession] = {}
@@ -49,8 +53,18 @@ class TmuxView(Vertical):
         self.danger = danger
         self._table.set_danger(danger)
 
+    def animate_progress(self, frame: int):
+        self._table.animate_progress(frame)
+
     def _columns_for(self, procs: List[ProcInfo]) -> list:
-        return columns_with_meta(TMUX_COLUMNS, procs)
+        cols = columns_with_meta(TMUX_COLUMNS, procs, mode="tmux")
+        # Sorting by COMMAND in tmux groups the programs first, shells last
+        # (then alphabetical), so the running work is always on top.
+        return [
+            replace(c, sort=lambda p: (p.pid in self._shell_pids, p.cmd.lower()))
+            if c.key == "COMMAND" else c
+            for c in cols
+        ]
 
     def update(self, named_sessions: Dict[str, TmuxSession], all_procs: List[ProcInfo]):
         self._shell_pids.clear()

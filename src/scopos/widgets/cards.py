@@ -105,13 +105,15 @@ class DeviceCard(Vertical):
         self._device = device
         self._render_header(device)
         self.proc_table.set_danger(self.danger)
-        self.proc_table.update(self._visible_procs(device), empty_message=self._empty_message())
+        self.proc_table.update(self._visible_procs(device), empty_message=self._empty_message(),
+                               context=device)
 
     def set_danger(self, danger: bool):
         self.danger = danger
         self.proc_table.set_danger(danger)
         if self._device is not None and self.is_mounted:
-            self.proc_table.update(self._visible_procs(self._device), empty_message=self._empty_message())
+            self.proc_table.update(self._visible_procs(self._device), empty_message=self._empty_message(),
+                                   context=self._device)
 
     # -- subclass hooks ----------------------------------------------------
     def _render_header(self, device: DeviceInfo):
@@ -166,7 +168,7 @@ class GpuCard(DeviceCard):
     # Normal mode shows every column; zen mode uses the metadata layout.
     def _columns_for(self, procs: List[ProcInfo]) -> List[Column]:
         if self.zen:
-            return columns_with_meta(ZEN_COLUMNS, procs)
+            return columns_with_meta(ZEN_COLUMNS, procs, mode="zen")
         return GLOBAL_COLUMNS or [COLS["PID"]]
 
     def _empty_message(self) -> str:
@@ -249,7 +251,7 @@ class CpuCard(DeviceCard):
         return device.user_procs.get(self.monitor.focus_user, [])
 
     def _columns_for(self, procs: List[ProcInfo]) -> List[Column]:
-        return columns_with_meta(CPU_COLUMNS, procs)
+        return columns_with_meta(CPU_COLUMNS, procs, mode="cpu")
 
     def _empty_message(self) -> str:
         return "— no scopos-reporting processes —"
