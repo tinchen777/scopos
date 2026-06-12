@@ -9,7 +9,8 @@ the cards build on it without any circular dependency.
 
 from __future__ import annotations
 from rich.text import Text
-from typing import (Any, Callable, Dict, List, Optional, Tuple)
+from dataclasses import dataclass
+from typing import (Any, Callable, Dict, List, Optional)
 
 from .. import config
 from ..metadata.utils import is_progress
@@ -57,7 +58,11 @@ def render_progress(data: Dict[str, Any], frame: int = 0, width: int = config.PR
         if 0.0 <= frac <= 1.0:
             filled = int(round(frac * width))
             bar.append("■" * filled, style=color)
-            bar.append(">" * (width - filled), style=track)
+            undo_char = [">"] * (width - filled)
+            idx = frame % width - filled
+            if idx >= 0:
+                undo_char[idx] = " "
+            bar.append("".join(undo_char), style=track)
         else:
             bar.append("-" * width, style=track)
         bar.append("▏", style="grey50")
@@ -72,10 +77,6 @@ def render_progress(data: Dict[str, Any], frame: int = 0, width: int = config.PR
 
 
 # -- text helpers ----------------------------------------------------------
-def clip(text: str, width: int) -> str:
-    return text if len(text) <= width else text[: max(1, width - 1)] + "…"
-
-
 def fit_cell(value: Any, width: Optional[int]) -> Any:
     """Clip a cell's text to ``width`` with an ellipsis; ``None`` = no clip.
 
@@ -106,6 +107,7 @@ def _meta_sort_value(value: Any):
 
 
 # -- columns ---------------------------------------------------------------
+@dataclass
 class Column:
     """One table column: how to label, sort and render it.
 
@@ -115,59 +117,56 @@ class Column:
     (the full value is still stored, so hovering shows it); ``None`` auto-sizes
     (used for metadata columns, which we always show in full).
     """
-
-    __slots__ = ("key", "label", "sort", "render", "meta_key", "width")
-
-    def __init__(self, key: str, label: str, sort: Optional[Callable],
-                 render: Callable[[Any, ProcInfo], Any],
-                 meta_key: Optional[str] = None, width: Optional[int] = None):
-        self.key = key
-        self.label = label
-        self.sort = sort
-        self.render = render
-        self.meta_key = meta_key
-        self.width = width
-
-
-def _user_cell(card: Any, p: ProcInfo) -> Text:
-    return Text(f"● {p.user}", style=card.monitor.color_for(p.user))
+    key: str
+    label: str
+    sort: Optional[Callable[[ProcInfo], Any]]
+    render: Callable[[Any, ProcInfo], Any]
+    meta_key: Optional[str] = None
+    width: Optional[int] = None
 
 
 def _w(key: str) -> Optional[int]:
     return config.COLUMN_WIDTHS.get(key)
 
 
-def is_visible(key: str) -> bool:
+def _is_visible(key: str) -> bool:
     """Whether a built-in column is shown (config.COLUMN_VISIBLE, default True)."""
     return config.COLUMN_VISIBLE.get(key, True)
 
-
-# MEM/GB is GPU memory; RAM/GB is host (CPU) memory. Widths come from config.
-ALL_COLUMNS: List[Column] = [
-    Column("PID", "PID", lambda p: p.pid, lambda c, p: str(p.pid), width=_w("PID")),
-    Column("USER", "USER", lambda p: p.user.lower(), _user_cell, width=_w("USER")),
-    Column("NO.", "NO.", lambda p: (p.user.lower(), p.number), lambda c, p: p.number, width=_w("NO.")),
-    Column("MEM/GB", "MEM/GB", lambda p: p.mem, lambda c, p: fmt_gb(p.mem), width=_w("MEM/GB")),
-    Column("RAM/GB", "RAM/GB", lambda p: p.rss, lambda c, p: fmt_gb(p.rss), width=_w("RAM/GB")),
-    Column("RUNTIME", "RUNTIME", lambda p: p.runtime_sec, lambda c, p: p.runtime, width=_w("RUNTIME")),
-    Column("SESSION", "SESSION", lambda p: p.sname.lower(), lambda c, p: p.sname, width=_w("SESSION")),
-    Column("S.START", "S.START", lambda p: p.s_start_ts, lambda c, p: p.s_start, width=_w("S.START")),
-    Column("COMMAND", "COMMAND", lambda p: p.cmd.lower(), lambda c, p: p.cmd, width=_w("COMMAND")),
-]
-COLS: Dict[str, Column] = {c.key: c for c in ALL_COLUMNS}
-
-# The classic, show-everything layout (minus any columns hidden in config).
-NORMAL_COLUMNS: List[Column] = [
-    COLS[k] for k in ("PID", "USER", "NO.", "MEM/GB", "RAM/GB", "RUNTIME", "SESSION", "S.START", "COMMAND")
-    if is_visible(k)
-]
-# Zen mode drops USER and S.START; metadata columns go in before COMMAND.
-ZEN_FIXED_KEYS = ("PID", "NO.", "MEM/GB", "RAM/GB", "RUNTIME", "SESSION")
+COLS: Dict[str, Column] = {
+    "PID": Column(key="PID", label="PID", sort=lambda p: p.pid,
+                  render=lambda _, p: str(p.pid), width=_w("PID")),
+    "USER": Column(key="USER", label="USER", sort=lambda p: p.user.lower(),
+                   render=lambda card, p: Text(f"● {p.user}", style=card.monitor.color_for(p.user)), width=_w("USER")),
+    "NO.": Column(key="NO.", label="NO.", sort=lambda p: (p.user.lower(), p.number),
+                  render=lambda card, p: Text(p.number, style=card.monitor.color_for(p.user)), width=_w("NO.")),
+    "MEM/GB": Column(key="MEM/GB", label="MEM/GB", sort=lambda p: p.mem,
+                     render=lambda _, p: fmt_gb(p.mem), width=_w("MEM/GB")),
+    "RAM/GB": Column(key="RAM/GB", label="RAM/GB", sort=lambda p: p.rss,
+                     render=lambda _, p: fmt_gb(p.rss), width=_w("RAM/GB")),
+    "RUNTIME": Column(key="RUNTIME", label="RUNTIME", sort=lambda p: p.runtime_sec,
+                      render=lambda _, p: p.runtime, width=_w("RUNTIME")),
+    "SESSION": Column(key="SESSION", label="SESSION", sort=lambda p: p.s_alias,
+                      render=lambda _, p: p.s_alias, width=_w("SESSION")),
+    "S.START": Column(key="S.START", label="S.START", sort=lambda p: p.s_start_ts,
+                      render=lambda _, p: p.s_start, width=_w("S.START")),
+    "COMMAND": Column(key="COMMAND", label="COMMAND", sort=lambda p: p.cmd.lower(),
+                      render=lambda _, p: p.cmd, width=_w("COMMAND"))
+}
+# global mode
+GLOBAL_COLUMNS: List[Column] = list(COLS.values())
+# zen mode
+ZEN_KEYS = ("PID", "NO.", "MEM/GB", "RAM/GB", "RUNTIME", "SESSION")
+ZEN_COLUMNS: List[Column] = [COLS[k] for k in ZEN_KEYS if _is_visible(k)]
 # The CPU card / tmux page are like zen but have no GPU memory column.
-CPU_FIXED_KEYS = ("PID", "NO.", "RAM/GB", "RUNTIME", "SESSION")
+CPU_KEYS = ("PID", "NO.", "RAM/GB", "RUNTIME", "SESSION")
+CPU_COLUMNS: List[Column] = [COLS[k] for k in CPU_KEYS if _is_visible(k)]
+# tmux mode
+TMUX_KEYS = ("SESSION", "PID", "RAM/GB", "RUNTIME")
+TMUX_COLUMNS: List[Column] = [COLS[k] for k in TMUX_KEYS if _is_visible(k)]
 
 # Columns that read most naturally largest-first on the initial click.
-DESC_FIRST_KEYS = {"PID", "MEM/GB", "RAM/GB", "RUNTIME", "S.START"}
+REVERSE_KEYS = {"PID", "MEM/GB", "RAM/GB", "RUNTIME", "S.START"}
 
 
 def meta_column(key: str) -> Column:
@@ -185,13 +184,8 @@ def meta_column(key: str) -> Column:
                   render=render, meta_key=key)
 
 
-def columns_with_meta(fixed_keys: Tuple[str, ...], procs: List[ProcInfo]) -> List[Column]:
+def columns_with_meta(fixed_cols: List[Column], procs: List[ProcInfo]) -> List[Column]:
     """Fixed columns + one column per reported field (first-seen order) + COMMAND."""
-    fixed = [COLS[k] for k in fixed_keys if is_visible(k)]
-    meta_keys: List[str] = []
-    for proc in procs:
-        for key in proc.meta:
-            if key not in meta_keys:
-                meta_keys.append(key)
-    tail = [COLS["COMMAND"]] if is_visible("COMMAND") else []
-    return (fixed + [meta_column(k) for k in meta_keys] + tail) or [COLS["PID"]]
+    meta_keys = list(dict.fromkeys(key for proc in procs for key in proc.meta))
+    tail = [COLS["COMMAND"]] if _is_visible("COMMAND") else []
+    return (fixed_cols + [meta_column(k) for k in meta_keys] + tail) or [COLS["PID"]]

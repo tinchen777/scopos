@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import time
 from collections import Counter
-from rich.text import Text
+from rich.text import (Text, Span)
 from textual import work
 from textual.binding import Binding
 from textual.app import (App, ComposeResult)
@@ -21,13 +21,14 @@ from .widgets.dialogs import confirm_and_kill
 from .widgets.others import (Clock, Logo, SysMeter, CPUMeter)
 from .widgets.views import (InfoView, TmuxView)
 
+render_tab = lambda t: Text(t, spans=[Span(0, 1, "bold underline")])
 TABS_INFO = {
-    "global": ("Global Mode (g)", "view-grid"),
-    "zen": ("Zen Mode (z)", "view-grid"),
-    "tmux": ("Tmux Mode (t)", "view-tmux"),
-    "info": ("Info (i)", "view-info"),
+    "global": (render_tab("Global Mode"), "view-grid"),
+    "zen": (render_tab("Zen Mode"), "view-grid"),
+    "tmux": (render_tab("Tmux Mode"), "view-tmux"),
+    "info": (render_tab("Info"), "view-info"),
 }
-TABS = list(TABS_INFO.keys())
+TABS = list(TABS_INFO)
 
 
 class ScoposApp(App):
@@ -147,24 +148,6 @@ class ScoposApp(App):
     DARK_THEME = "textual-dark"
     LIGHT_THEME = "textual-light"
 
-    def check_action(self, action: str, parameters):
-        """Footer visibility: relabel theme/danger and reveal kill/clear in danger.
-
-        ``False`` hides a binding (and blocks its key); ``True`` shows it.
-        """
-        dark = self.theme != self.LIGHT_THEME
-        if action == "theme_light":
-            return dark or False
-        if action == "theme_dark":
-            return (not dark) or False
-        if action == "arm_danger":
-            return (not self.danger) or False
-        if action == "disarm_danger":
-            return self.danger or False
-        if action in ("kill", "clear_ticks"):
-            return self.danger or False
-        return True
-
     def __init__(self, focus_user: str, interval: int = 5, demo: bool = False, theme: str = "textual-dark", mode: str = "global"):
         super().__init__()
         if not focus_user:
@@ -184,7 +167,13 @@ class ScoposApp(App):
         self._cpu_card: Optional[CpuCard] = None
         self._frame: int = 0
         self._status_main: str = ""  # mode-specific status text, sans danger/selection
-        self.theme = theme
+        self._set_theme(theme, default=self.DARK_THEME)
+
+    def _set_theme(self, theme: str, default: str):
+        try:
+            self.theme = theme
+        except Exception:
+            self.theme = default
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="topbar"):
@@ -218,9 +207,9 @@ class ScoposApp(App):
             return
         self._frame += 1
         for gpu_card in self._gpu_cards.values():
-            gpu_card.animate_progress(self._frame)
+            gpu_card.proc_table.animate_progress(self._frame)
         if self._cpu_card is not None:
-            self._cpu_card.animate_progress(self._frame)
+            self._cpu_card.proc_table.animate_progress(self._frame)
 
     def on_resize(self):
         self._relayout_columns()
@@ -244,6 +233,25 @@ class ScoposApp(App):
     def _next_mode(self):
         index = (TABS.index(self.mode) + 1) % len(TABS)
         return TABS[index]
+
+    def check_action(self, action: str, parameters):
+        """Footer visibility: relabel theme/danger and reveal kill/clear in danger.
+
+        ``False`` hides a binding (and blocks its key); ``True`` shows it.
+        """
+        dark = "light" not in self.theme
+        if action == "theme_light":
+            return dark or False
+        if action == "theme_dark":
+            return (not dark) or False
+
+        if action == "arm_danger":
+            return (not self.danger) or False
+        if action == "disarm_danger":
+            return self.danger or False
+        if action in ("kill", "clear_ticks"):
+            return self.danger or False
+        return True
 
     def action_refresh(self):
         self.refresh_data()
@@ -277,11 +285,11 @@ class ScoposApp(App):
 
     # -- theme (relabels Light/Dark in the footer) -------------------------
     def action_theme_light(self):
-        self.theme = self.LIGHT_THEME
+        self._set_theme(self.theme.replace("dark", "light"), default=self.LIGHT_THEME)
         self.refresh_bindings()
 
     def action_theme_dark(self):
-        self.theme = self.DARK_THEME
+        self._set_theme(self.theme.replace("light", "dark"), default=self.DARK_THEME)
         self.refresh_bindings()
 
     # -- danger / selection ------------------------------------------------
@@ -348,33 +356,42 @@ class ScoposApp(App):
     def _collect_grid(self):
         mode = self.mode
         try:
-            gpus, user_procs = self.monitor.collect_GPU()
+            gpus, focus_user_pids = self.monitor.collect_GPUs()
             cpu = None
             if mode == "zen":
-                cpu = self.monitor.collect_CPU({p.pid for p in user_procs.get(self.focus_user, [])})
+                cpu = self.monitor.collect_CPU(focus_user_pids)
+            # apply
+            self.call_from_thread(self._apply_grid, mode, gpus, cpu)
         except Exception as exc:  # keep the UI alive on transient NVML errors
             self.call_from_thread(self._set_status, f"collection error: {exc}")
-            return
-        self.call_from_thread(self._apply_grid, mode, gpus, cpu)
 
     def _apply_grid(self, mode: str, gpus: List[GPUInfo], cpu: Optional[CPUInfo]):
         if self.mode != mode:  # user switched tabs while we were collecting
             return
         self._sync_gpu_cards(gpus)
         if mode == "zen" and cpu is not None:
+            # zen mode
             self._sync_cpu_card(cpu)
-            n_cpu_procs = len(cpu.procs)
+            state_str = (
+                f"{sum(len(gpu.user_procs.get(self.focus_user, [])) for gpu in gpus)} GPU proc(s)  ·  "
+                f"{len(cpu.procs)} CPU proc(s)  ·  "
+                f"focus on [{self.focus_user}]"
+            )
         else:
+            # global mode
             if self._cpu_card is not None:
                 self._cpu_card.remove()
                 self._cpu_card = None
                 self.call_after_refresh(self._relayout_columns)
-            n_cpu_procs = 0
+            state_str = (
+                f"{sum(len(gpu.procs) for gpu in gpus)} GPU proc(s)  ·  "
+                f"{len(set(user for g in gpus for user in g.user_mems))} user(s)"
+            )
+
         demo_tag = "demo" if self.demo else "live"
         self._set_status(
-            f"{len(gpus)} GPU(s) · {sum(len(gpu.procs) for gpu in gpus) + n_cpu_procs} proc(s) · "
-            f"{sum(len(g.user_mems) for g in gpus)} user(s)  ·  refresh {self.interval}s  ·  "
-            f"{demo_tag}  ·  focus on [{self.focus_user}]"
+            f"{len(gpus)} GPU(s) · {state_str}  ·  {demo_tag}"
+            f"  ·  refresh {self.interval}s"
         )
         self._stamp_clock()
 
@@ -382,22 +399,22 @@ class ScoposApp(App):
     def _collect_tmux(self):
         mode = self.mode
         try:
-            sessions = self.monitor.collect_tmux()
+            named_sessions, all_procs = self.monitor.collect_tmux()
+            # apply
+            self.call_from_thread(self._apply_tmux, mode, named_sessions, all_procs)
         except Exception as exc:
             self.call_from_thread(self._set_status, f"collection error: {exc}")
-            return
-        self.call_from_thread(self._apply_tmux, mode, sessions)
 
-    def _apply_tmux(self, mode: str, sessions: list):
+    def _apply_tmux(self, mode: str, named_sessions: dict, all_procs: list):
         if self.mode != mode:
             return
         tmux = self.query_one("#tmux", TmuxView)
         tmux.set_danger(self.danger)
-        tmux.update(sessions)
-        n_proc = sum(len(s.all_procs) for s in sessions)
+        tmux.update(named_sessions, all_procs)
+        demo_tag = "demo" if self.demo else "live"
         self._set_status(
-            f"tmux · {len(sessions)} session(s) · {n_proc} proc(s)  ·  "
-            f"focus on [{self.focus_user}]  ·  your own tmux server only"
+            f"{len(named_sessions)} session(s) · {len(all_procs)} proc(s)  ·  "
+            f"{demo_tag}  ·  refresh {self.interval}s"
         )
         self._stamp_clock()
 
@@ -452,11 +469,11 @@ class ScoposApp(App):
         if main is not None:
             self._status_main = main
         text = Text(
-            f"{self._status_main}  ·  {self.mode}  ·  press m for {self._next_mode()} mode",
+            f"{self.mode} mode  ·  {self._status_main}",
             style="dim",
         )
         if self.danger:
-            text.append("  ·  ⚠ DANGER (tick rows, then k)", style="bold red")
+            text.append("  ·  ⚠ DANGER (process kill is allowed)", style="bold red")
         sel = self._selection_summary()
         if sel:
             text.append(sel, style="bold yellow")

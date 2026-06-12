@@ -6,12 +6,13 @@ from rich.text import Text
 from textual.containers import Vertical
 from textual.widget import Widget
 from textual.widgets import Static
-from typing import (List, Optional, Tuple)
+from typing import (List, Optional, Tuple, Generator)
 
 from .. import config
 from ..monitor import (DeviceInfo, GPUInfo, Monitor, ProcInfo)
 from ._utils import fmt_gb
-from .columns import (COLS, CPU_FIXED_KEYS, NORMAL_COLUMNS, ZEN_FIXED_KEYS, Column, columns_with_meta)
+from .columns import (
+    COLS, GLOBAL_COLUMNS, ZEN_COLUMNS, CPU_COLUMNS, Column, columns_with_meta)
 from .proc_table import ProcTable
 
 
@@ -88,15 +89,6 @@ class DeviceCard(Vertical):
         self._device: Optional[DeviceInfo] = None
         self._deferred: Optional[DeviceInfo] = None
 
-    def compose(self):
-        yield self.stats
-        yield from self._extra_widgets()
-        yield self.proc_table
-
-    def _extra_widgets(self):
-        """Header widgets between the stats line and the table (GPU adds a bar)."""
-        return iter(())
-
     def on_mount(self):
         if self._deferred is not None:
             self._apply(self._deferred)
@@ -121,14 +113,8 @@ class DeviceCard(Vertical):
         if self._device is not None and self.is_mounted:
             self.proc_table.update(self._visible_procs(self._device), empty_message=self._empty_message())
 
-    def animate_progress(self, frame: int):
-        self.proc_table.animate_progress(frame)
-
     # -- subclass hooks ----------------------------------------------------
     def _render_header(self, device: DeviceInfo):
-        raise NotImplementedError
-
-    def _fixed_keys(self) -> Tuple[str, ...]:
         raise NotImplementedError
 
     def _visible_procs(self, device: DeviceInfo) -> List[ProcInfo]:
@@ -138,7 +124,7 @@ class DeviceCard(Vertical):
         raise NotImplementedError
 
     def _columns_for(self, procs: List[ProcInfo]) -> List[Column]:
-        return columns_with_meta(self._fixed_keys(), procs)
+        raise NotImplementedError
 
 
 class GpuCard(DeviceCard):
@@ -150,9 +136,11 @@ class GpuCard(DeviceCard):
         self.legend = Static(classes="legend")
         self.zen = zen
 
-    def _extra_widgets(self):
+    def compose(self):
+        yield self.stats
         yield self.bar
         yield self.legend
+        yield self.proc_table
 
     def set_zen(self, zen: bool):
         if zen == self.zen:
@@ -169,20 +157,17 @@ class GpuCard(DeviceCard):
         self._update_bar(gpu)
         self._update_legend(gpu)
 
-    def _fixed_keys(self) -> Tuple[str, ...]:
-        return ZEN_FIXED_KEYS
-
     def _visible_procs(self, device: DeviceInfo) -> List[ProcInfo]:
         """In zen mode the table is filtered down to the watched user."""
         if self.zen:
-            return [p for p in device.procs if p.user == self.monitor.focus_user]
-        return list(device.procs)
+            return device.user_procs.get(self.monitor.focus_user, [])
+        return device.procs
 
     # Normal mode shows every column; zen mode uses the metadata layout.
     def _columns_for(self, procs: List[ProcInfo]) -> List[Column]:
         if self.zen:
-            return columns_with_meta(self._fixed_keys(), procs)
-        return NORMAL_COLUMNS or [COLS["PID"]]
+            return columns_with_meta(ZEN_COLUMNS, procs)
+        return GLOBAL_COLUMNS or [COLS["PID"]]
 
     def _empty_message(self) -> str:
         if self.zen:
@@ -248,6 +233,10 @@ class CpuCard(DeviceCard):
     Parallel to :class:`GpuCard` but with no GPU memory column and no bar/legend.
     """
 
+    def compose(self):
+        yield self.stats
+        yield self.proc_table
+
     def _render_header(self, device: DeviceInfo):
         self.border_title = f" \U0001f9ee  <{device.name}>  ·  tracked process(es) of {self.monitor.focus_user} via scopos API "
         rss_total = sum(p.rss for p in device.procs)
@@ -256,11 +245,11 @@ class CpuCard(DeviceCard):
         line.append(f"    [RAM] {fmt_gb(rss_total)} GB", style="bold")
         self.stats.update(line)
 
-    def _fixed_keys(self) -> Tuple[str, ...]:
-        return CPU_FIXED_KEYS
-
     def _visible_procs(self, device: DeviceInfo) -> List[ProcInfo]:
-        return list(device.procs)
+        return device.user_procs.get(self.monitor.focus_user, [])
+
+    def _columns_for(self, procs: List[ProcInfo]) -> List[Column]:
+        return columns_with_meta(CPU_COLUMNS, procs)
 
     def _empty_message(self) -> str:
         return "— no scopos-reporting processes —"

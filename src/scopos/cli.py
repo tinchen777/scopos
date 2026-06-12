@@ -16,7 +16,7 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument(
         "-t",
         "--theme",
-        default="textual-dark",
+        default="textual",
         help="Textual theme to use (default: textual-dark). See https://textual.textualize.io/themes/ for options.",
     )
     parser.add_argument(

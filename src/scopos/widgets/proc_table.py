@@ -13,8 +13,8 @@ from typing import (Any, Callable, Dict, List, Optional, Tuple)
 from .. import config
 from ..metadata.utils import is_progress
 from ..monitor import (Monitor, ProcInfo)
-from .columns import (CHECK_WIDTH, COLS, DESC_FIRST_KEYS, Column, fit_cell,
-                      progress_text, render_progress)
+from .columns import (
+    CHECK_WIDTH, COLS, REVERSE_KEYS, Column, fit_cell, progress_text, render_progress)
 from .dialogs import (ContextMenu, confirm_and_kill)
 
 
@@ -33,14 +33,22 @@ class ProcTable(Vertical):
     ProcTable DataTable {{ height: auto; max-height: {config.TABLE_MAX_HEIGHT}; }}
     """
 
-    def __init__(self, monitor: Monitor, columns_for: Callable[[List[ProcInfo]], List[Column]],
-                 *, danger: bool = False):
+    def __init__(
+        self,
+        monitor: Monitor,
+        columns_for: Callable[[List[ProcInfo]], List[Column]],
+        *,
+        danger: bool = False
+    ):
         super().__init__()
         self.monitor = monitor
         self._columns_for = columns_for
         self.danger = danger
-        self.table = DataTable(zebra_stripes=True, cursor_type="row",
-                               cell_padding=config.TABLE_CELL_PADDING)
+        self.table = DataTable(
+            zebra_stripes=True,
+            cursor_type="row",
+            cell_padding=config.TABLE_CELL_PADDING
+        )
         self.selected: set = set()              # ticked pids (batch kill)
         self._sel_users: Dict[int, str] = {}    # ticked pid -> user (for the count-by-user readout)
         self._proc_by_pid: Dict[int, ProcInfo] = {}
@@ -81,9 +89,14 @@ class ProcTable(Vertical):
     def selected_procs(self) -> List[ProcInfo]:
         return [self._proc_by_pid[pid] for pid in self.selected if pid in self._proc_by_pid]
 
-    def update(self, procs: List[ProcInfo], *, empty_message: str = "— no processes —",
-               row_style: Optional[Callable[[ProcInfo], Optional[str]]] = None,
-               extra_menu: Optional[Callable[[ProcInfo], List[Tuple]]] = None):
+    def update(
+        self,
+        procs: List[ProcInfo],
+        *,
+        empty_message: str = "— no processes —",
+        row_style: Optional[Callable[[ProcInfo], Optional[str]]] = None,
+        extra_menu: Optional[Callable[[ProcInfo], List[Tuple]]] = None
+    ):
         self._procs = list(procs)
         self._empty_message = empty_message
         self._row_style = row_style
@@ -118,7 +131,7 @@ class ProcTable(Vertical):
             return
 
         sort_col = next((c for c in columns if c.key == self._sort_key and c.sort), None)
-        if sort_col:
+        if sort_col and sort_col.sort is not None:
             procs.sort(key=sort_col.sort, reverse=self._sort_reverse)
         check = self.danger
         if check and self.selected:
@@ -152,7 +165,7 @@ class ProcTable(Vertical):
                 row.append(cell)
                 if col.meta_key is not None:
                     value = proc.meta.get(col.meta_key)
-                    if value is not None and is_progress(value) and value.get("frac") is None:
+                    if value is not None and is_progress(value):
                         self._anim_cells.append((r, offset + ci, value))
             table.add_row(*row)
 
@@ -191,7 +204,7 @@ class ProcTable(Vertical):
             self._sort_reverse = not self._sort_reverse
         else:
             self._sort_key = col.key
-            self._sort_reverse = col.key in DESC_FIRST_KEYS
+            self._sort_reverse = col.key in REVERSE_KEYS
         self._rebuild()
 
     # -- mouse: checkbox toggle + right-click menu -------------------------
@@ -212,6 +225,7 @@ class ProcTable(Vertical):
             self._rebuild()
             self._notify_selection()
             return
+        # Right-click anywhere on a valid row opens the context menu.
         if event.button != 3 or not valid_row:
             return
         event.stop(); event.prevent_default()
@@ -219,7 +233,7 @@ class ProcTable(Vertical):
         options: List[Tuple[str, str]] = [("copy", "📋 Copy info ")]
         self._menu_extra = {}
         if self.danger:
-            options.append(("kill", f"💀 Kill (PID {proc.pid}) "))
+            options.append(("kill", f"💀 Kill [{proc.pid} - {proc.user}] "))
             if self.selected:
                 options.append(("kill_sel", f"💀 Kill {len(self.selected)} selected "))
             if self._extra_menu:
@@ -249,6 +263,7 @@ class ProcTable(Vertical):
             if raw is None:
                 return ""
             return progress_text(raw) if is_progress(raw) else str(raw)
+            # TODO
         value = col.render(self, proc)
         return value.plain if isinstance(value, Text) else str(value)
 
@@ -259,7 +274,7 @@ class ProcTable(Vertical):
     def _copy(self, proc: ProcInfo):
         try:
             self.app.copy_to_clipboard(self._proc_info(proc))
-            self.app.notify(f"Copied info for PID {proc.pid}")
+            self.app.notify(f"Copied info for [{proc.pid} - {proc.user}]")
         except Exception as exc:
             self.app.notify(f"Copy failed: {exc}", severity="error")
 

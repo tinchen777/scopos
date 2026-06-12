@@ -12,7 +12,7 @@ from typing import (Dict, List, Tuple)
 
 from .. import (__version__, __author__)
 from ..monitor import (Monitor, ProcInfo, TmuxPane, TmuxSession)
-from .columns import columns_with_meta
+from .columns import (TMUX_COLUMNS, columns_with_meta)
 from .proc_table import ProcTable
 
 
@@ -30,9 +30,6 @@ class TmuxView(Vertical):
     TmuxView { height: auto; }
     TmuxView #hint { height: auto; color: $text-muted; padding: 0 2; }
     """
-
-    # SESSION shows "name:win.pane", so it doubles as the grouping column.
-    FIXED_KEYS: Tuple[str, ...] = ("SESSION", "PID", "RAM/GB", "RUNTIME")
 
     def __init__(self, monitor: Monitor, id: str, danger: bool = False):
         super().__init__(id=id)
@@ -53,30 +50,26 @@ class TmuxView(Vertical):
         self._table.set_danger(danger)
 
     def _columns_for(self, procs: List[ProcInfo]) -> list:
-        return columns_with_meta(self.FIXED_KEYS, procs)
+        return columns_with_meta(TMUX_COLUMNS, procs)
 
-    def update(self, sessions: List[TmuxSession]):
+    def update(self, named_sessions: Dict[str, TmuxSession], all_procs: List[ProcInfo]):
         self._shell_pids.clear()
         self._pane_of.clear()
         self._session_of.clear()
-        procs: List[ProcInfo] = []
-        for session in sessions:
+        for session in named_sessions.values():
             for pane in session.panes:
                 for i, proc in enumerate(pane.procs):
                     self._pane_of[proc.pid] = pane
                     self._session_of[proc.pid] = session
                     if i == 0:
                         self._shell_pids.add(proc.pid)  # the pane's shell
-                procs.extend(pane.procs)
-        n_prog = len(procs) - len(self._shell_pids)
-        hint = (f"tmux · {len(sessions)} session(s) · {n_prog} program(s) · "
+        n_prog = len(all_procs) - len(self._shell_pids)
+        hint = (f"tmux · {len(named_sessions)} session(s) · {n_prog} program(s) · "
                 f"{len(self._shell_pids)} shell(s)")
-        hint += ("   ·   right-click: copy / kill (proc · pane · session)" if self.danger
-                 else "   ·   right-click to copy · ctrl+shift+k to arm kill")
         self._hint.update(Text(hint, style="dim"))
         self._table.set_danger(self.danger)
         self._table.update(
-            procs,
+            all_procs,
             empty_message="— no tmux sessions for this user —",
             row_style=lambda p: "dim" if p.pid in self._shell_pids else None,
             extra_menu=self._extra_menu,
@@ -88,11 +81,14 @@ class TmuxView(Vertical):
         pane = self._pane_of.get(proc.pid)
         session = self._session_of.get(proc.pid)
         if pane is not None and len(pane.procs) > 1:
-            loc = f"{pane.session}:{pane.window_idx}.{pane.pane_idx}"
-            options.append(("kill_pane", f"💀 Kill pane {loc} ", list(pane.procs), f"pane {loc}"))
-        if session is not None and len(session.all_procs) > 1:
-            options.append(("kill_session", f"💀 Kill session {session.name} ",
-                            list(session.all_procs), f"session {session.name}"))
+            options.append(("kill_pane", f"💀 Kill pane {pane.alias} ", list(pane.procs), f"pane {pane.alias}"))
+        if session is not None:
+            session_procs = session.session_procs
+            if len(session_procs) > 1:
+                options.append((
+                    "kill_session", f"💀 Kill session {session.alias} ",
+                    list(session_procs), f"session {session.alias}"
+                ))
         return options
 
 
