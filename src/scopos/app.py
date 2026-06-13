@@ -141,6 +141,7 @@ class ScoposApp(App):
         Binding("h", "theme_dark", "Theme Dark", key_display="H"),    # shown when light
         Binding("d", "arm_danger", "Danger Mode", key_display="D"),   # shown when safe
         Binding("d", "disarm_danger", "Safe Mode", key_display="D"),  # shown when danger
+        Binding("a", "select_all", "Select All", key_display="A"),    # shown when danger
         Binding("k", "kill", "Kill Selected", key_display="K"),       # shown when danger
         Binding("c", "clear_ticks", "Clear Ticks", key_display="C"),  # shown when danger
     ]
@@ -253,7 +254,7 @@ class ScoposApp(App):
             return (not self.danger) or False
         if action == "disarm_danger":
             return self.danger or False
-        if action in ("kill", "clear_ticks"):
+        if action in ("select_all", "kill", "clear_ticks"):
             return self.danger or False
         return True
 
@@ -318,6 +319,20 @@ class ScoposApp(App):
             severity="warning" if on else "information",
             timeout=5,
         )
+
+    def action_select_all(self):
+        """Toggle select-all across the visible table(s): tick everything, or
+        (if already all ticked) clear — the fast path for batch kills."""
+        tables = [t for t in self.query(ProcTable) if t._row_procs]
+        if not tables:
+            self.notify("Nothing to select", title="SELECT", timeout=2)
+            return
+        select = not all(t.all_selected() for t in tables)
+        for table in tables:
+            table.set_all_selected(select)
+        total = sum(len(t.selected) for t in self.query(ProcTable))
+        self.notify(f"Selected {total} process(es)" if select else "Cleared selection",
+                    title="SELECT", timeout=2)
 
     def action_clear_ticks(self):
         """Uncheck every batch-selected row across all tables."""

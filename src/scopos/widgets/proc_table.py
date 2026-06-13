@@ -93,6 +93,21 @@ class ProcTable(Vertical):
     def selected_procs(self) -> List[ProcInfo]:
         return [self._proc_by_pid[pid] for pid in self.selected if pid in self._proc_by_pid]
 
+    def all_selected(self) -> bool:
+        """True if every currently-shown row is ticked."""
+        return bool(self._row_procs) and all(p.pid in self.selected for p in self._row_procs)
+
+    def set_all_selected(self, on: bool):
+        """Tick every visible row, or clear the whole selection."""
+        if on:
+            for p in self._row_procs:
+                self.selected.add(p.pid)
+                self._sel_users[p.pid] = p.user
+            self._rebuild()
+            self._notify_selection()
+        else:
+            self.clear_selection()
+
     def update(
         self,
         procs: List[ProcInfo],
