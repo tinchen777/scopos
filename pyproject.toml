@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "scopos"
 dynamic = ["version"]
-description = "A Textual TUI for monitoring GPU memory usage, grouped by user."
+description = "A Textual terminal UI that monitors NVIDIA GPUs grouped by user — live memory/utilisation, per-user breakdown, tmux process management, scopos-API progress bars, and a confirm-guarded batch kill."
 readme = "README.md"
 license-files = ["LICENSE"]
 authors = [

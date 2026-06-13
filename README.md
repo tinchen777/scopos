@@ -3,7 +3,7 @@
 <p align="center">
   <img src="figures/scopos.png">
   <br>
-  <strong>NVIDIA GPU Monitor</strong>
+  <strong>A user-centric NVIDIA GPU monitor for the terminal</strong>
 </p>
 
 [![PyPI version](https://img.shields.io/pypi/v/scopos.svg)](https://pypi.org/project/scopos/)
@@ -15,10 +15,7 @@
 
 ## About
 
-Monitor NVIDIA GPU memory usage from the terminal, **grouped by user**. SCOPOS
-is built with [Textual](https://textual.textualize.io/): the layout adapts to
-your terminal size, and every GPU shows an at-a-glance bar of how its memory is
-split between users.
+`SCOPOS` is a [Textual](https://textual.textualize.io/)-based terminal UI for monitoring NVIDIA GPUs, grouped by user so you can tell at a glance who is using what. Beyond live memory, utilisation and temperature, it offers focused `Zen` and `Tmux` views, a lightweight Python API for your training scripts to report live status (progress bars with an ETA, loss, stage, …), and a guarded kill mode for cleaning up stray processes — right-click to copy, batch-select to terminate. The layout and theme are tunable from a single config file.
 
 - Python: 3.8+
 
