@@ -284,9 +284,28 @@ class ScoposApp(App):
     def on_tabs_tab_activated(self, event: Tabs.TabActivated):
         mode = (event.tab.id or "").removeprefix("tab-")
         if mode in TABS:
+            # Selections belong to one view; drop them so a select-all/kill in
+            # the new view can never touch the (hidden) previous view's tables.
+            for table in self.query(ProcTable):
+                table.selected.clear()
+                table._sel_users.clear()
             self.mode = mode
             self.query_one("#switcher", ContentSwitcher).current = TABS_INFO[mode][1]
             self.refresh_data()
+
+    def _active_tables(self) -> List[ProcTable]:
+        """ProcTables in the *currently visible* view only.
+
+        ``self.query(ProcTable)`` also returns the hidden ContentSwitcher panels'
+        tables (e.g. the global grid while tmux is showing), which still hold
+        their last data — selecting/killing those would hit processes that
+        aren't even on screen. Scope every selection action to the active view.
+        """
+        try:
+            view = self.query_one(f"#{TABS_INFO[self.mode][1]}")
+        except Exception:
+            return []
+        return list(view.query(ProcTable))
 
     # -- theme (relabels Light/Dark in the footer) -------------------------
     def action_theme_light(self):
@@ -323,28 +342,29 @@ class ScoposApp(App):
     def action_select_all(self):
         """Toggle select-all across the visible table(s): tick everything, or
         (if already all ticked) clear — the fast path for batch kills."""
-        tables = [t for t in self.query(ProcTable) if t._row_procs]
+        tables = [t for t in self._active_tables() if t._row_procs]
         if not tables:
             self.notify("Nothing to select", title="SELECT", timeout=2)
             return
         select = not all(t.all_selected() for t in tables)
         for table in tables:
             table.set_all_selected(select)
-        total = sum(len(t.selected) for t in self.query(ProcTable))
+        total = sum(len(t.selected) for t in tables)
         self.notify(f"Selected {total} process(es)" if select else "Cleared selection",
                     title="SELECT", timeout=2)
 
     def action_clear_ticks(self):
-        """Uncheck every batch-selected row across all tables."""
-        cleared = sum(len(t.selected) for t in self.query(ProcTable))
-        for table in self.query(ProcTable):
+        """Uncheck every batch-selected row in the visible view."""
+        tables = self._active_tables()
+        cleared = sum(len(t.selected) for t in tables)
+        for table in tables:
             table.clear_selection()
         self.notify(f"Cleared {cleared} selection(s)" if cleared else "No selection to clear",
                     title="CLEAR", timeout=2)
 
     def action_kill(self):
-        """Kill every ticked process (across all tables) in one confirmation."""
-        procs = [p for t in self.query(ProcTable) for p in t.selected_procs()]
+        """Kill every ticked process in the visible view, in one confirmation."""
+        procs = [p for t in self._active_tables() for p in t.selected_procs()]
         if not procs:
             self.notify("No processes selected", title="KILL", timeout=2)
             return
@@ -505,7 +525,7 @@ class ScoposApp(App):
     def _selection_summary(self) -> str:
         """``✓ N selected (alice:2, bob:1)`` — totals, broken down by user."""
         counts: Counter = Counter()
-        for table in self.query(ProcTable):
+        for table in self._active_tables():
             counts.update(table.selected_by_user())
         total = sum(counts.values())
         if not total:
