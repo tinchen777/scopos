@@ -1,24 +1,17 @@
 <div align="center">
 
-<h2 id="title">
-🐱‍👓 SCOPOS 🐱‍👓<br>
-<sub>NVIDIA GPU Monitor</sub>
-</h2>
+<p align="center">
+  <img src="figures/scopos.png">
+  <br>
+  <strong>NVIDIA GPU Monitor</strong>
+</p>
 
 [![PyPI version](https://img.shields.io/pypi/v/scopos.svg)](https://pypi.org/project/scopos/)
 ![Python](https://img.shields.io/pypi/pyversions/scopos?color=brightgreen)
 ![License](https://img.shields.io/github/license/tinchen777/scopos.svg)
-
 ![Github stars](https://img.shields.io/github/stars/tinchen777/scopos.svg)
 
 </div>
-
-```text
-  ___   ___  _____  ____  _____  ___
- / __) / __)(  _  )(  _ \(  _  )/ __)
- \__ \( (__  )(_)(  )___/ )(_)( \__ \
- (___/ \___)(_____)(__)  (_____)(___/
-```
 
 ## About
 
@@ -81,11 +74,16 @@ scopos -u alice --zen
 
 ## Tabs / modes
 
+![tab](figures/tab.png)
+
 A tab bar under the logo switches between four views (cycle with <kbd>m</kbd>,
 or jump with <kbd>g</kbd> / <kbd>z</kbd> / <kbd>t</kbd> / <kbd>i</kbd>; start on
 one with `-m/--mode`):
 
 - **Global** — every GPU, every user (the classic layout).
+
+![global](figures/global.png)
+
 - **Zen** — focused on `-u/--user` (see below).
 - **Tmux** — *your own* tmux processes in one flat, grid-style table (same
   columns and interactions as the cards), grouped by `session:win.pane`. Idle
@@ -93,12 +91,17 @@ one with `-m/--mode`):
   Right-click a row to copy it; in danger mode you can also kill the process,
   its whole pane, or its whole session (multi-process kills list every affected
   process and ask for confirmation).
+
+![tmux](figures/tmux.png)
+
 - **Info** — scopos version and this host's basic specs (CPU, RAM, GPUs).
 
 > tmux sockets are per-user, so the Tmux tab shows the tmux server of the user
 > running `scopos`.
 
 ## Zen mode
+
+![zen](figures/zen.png)
 
 Switch to **zen mode** (<kbd>z</kbd>, or start with `-m zen`), a focused layout
 meant to be paired with `-u/--user`:

@@ -188,7 +188,9 @@ def confirm_and_kill(app, procs, *, scope: str, detail: Optional[str] = None,
         msg = "⚠ Kill this process?\nSIGTERM, then SIGKILL after a grace period. Cannot be undone.\n\n" + detail
         label = "Kill"
     else:
-        listing = "\n".join(f"  • {p.pid:>7}  {_clip(p.cmd or p.pname, 60)}" for p in procs)
+        listing = ""
+        for i, p in enumerate(procs, 1):
+            listing += f"  {i:>{len(str(len(procs)))}}. [{p.user} {p.pid:>7}]  {_clip(p.cmd or p.pname, 60)}\n"
         msg = (f"⚠ Multi-process kill — {scope} ({len(procs)} processes).\n"
                "ALL of them will be terminated (SIGTERM, then SIGKILL). Cannot be undone:\n\n" + listing)
         label = f"Kill {len(procs)}"
