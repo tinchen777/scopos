@@ -213,23 +213,37 @@ class ProcTable(Vertical):
             self._sort_reverse = col.key in REVERSE_KEYS
         self._rebuild()
 
+    # -- selection ---------------------------------------------------------
+    def _toggle_select(self, proc: ProcInfo):
+        """Tick/untick a process (shared by the checkbox click and Enter)."""
+        if proc.pid in self.selected:
+            self.selected.discard(proc.pid)
+            self._sel_users.pop(proc.pid, None)
+        else:
+            self.selected.add(proc.pid)
+            self._sel_users[proc.pid] = proc.user
+        self._cursor_pid = proc.pid  # keep the row under the cursor as it floats
+        self._rebuild()
+        self._notify_selection()
+
+    def on_key(self, event: events.Key):
+        """Enter toggles the cursor row's tick (kill mode only) — a precise,
+        mouse-free alternative to clicking the small checkbox."""
+        if event.key != "enter" or not self.danger:
+            return
+        r = self.table.cursor_row
+        if 0 <= r < len(self._row_procs):
+            self._toggle_select(self._row_procs[r])
+            event.stop()
+
     # -- mouse: checkbox toggle + right-click menu -------------------------
     def on_mouse_down(self, event: events.MouseDown):
         coord = self.table.hover_coordinate
         valid_row = coord is not None and 0 <= coord.row < len(self._row_procs)
         # Left-click the checkbox column toggles selection (kill mode only).
         if event.button == 1 and self.danger and valid_row and coord.column == 0:
-            proc = self._row_procs[coord.row]
-            if proc.pid in self.selected:
-                self.selected.discard(proc.pid)
-                self._sel_users.pop(proc.pid, None)
-            else:
-                self.selected.add(proc.pid)
-                self._sel_users[proc.pid] = proc.user
-            self._cursor_pid = proc.pid
             event.stop(); event.prevent_default()
-            self._rebuild()
-            self._notify_selection()
+            self._toggle_select(self._row_procs[coord.row])
             return
         # Right-click anywhere on a valid row opens the context menu.
         if event.button != 3 or not valid_row:

@@ -39,6 +39,8 @@ class ProcInfo:
     s_start: str = ""  # session start time, formatted
     s_start_ts: float = 0.0  # raw session start time, for sorting
 
+    create_ts: float = 0.0  # process creation time, to guard against PID reuse on kill
+
     rss: int = 0  # host (CPU) memory used, in bytes
 
     number: str = ""  # per-user "parentNo-childNo" label, filled by Monitor
@@ -339,12 +341,12 @@ class Monitor:
                 cmd = " ".join(process.cmdline()).strip()
             except Exception:
                 cmd = name
-            # runtime_sec
+            # create time -> runtime (and a PID-reuse guard for kill)
             try:
-                runtime_sec = int(time.time() - process.create_time())
+                create_ts = process.create_time()
             except Exception:
-                runtime_sec = 0
-            # runtime
+                create_ts = 0.0
+            runtime_sec = int(time.time() - create_ts) if create_ts else 0
             runtime = fmt_duration(runtime_sec)
             # rss
             try:
@@ -352,7 +354,8 @@ class Monitor:
             except Exception:
                 rss = 0
 
-        return ProcInfo(pid=pid, pname=name, user=user, runtime=runtime, runtime_sec=runtime_sec, cmd=cmd or name, rss=rss, meta=read_fields(pid))
+        return ProcInfo(pid=pid, pname=name, user=user, runtime=runtime, runtime_sec=runtime_sec,
+                        cmd=cmd or name, create_ts=create_ts, rss=rss, meta=read_fields(pid))
 
     def _build_proc(self, process: psutil.Process, mem: int = 0) -> ProcInfo:
         proc_info = self._build_proc_basics(process)
@@ -609,7 +612,7 @@ class DemoMonitor(Monitor):
             pid=job["pid"], pname=job["pname"], user=job["user"],
             mem=job["mem"], runtime=fmt_duration(runtime_sec), cmd=job["cmd"],
             runtime_sec=runtime_sec, sid=job["sid"], sname=job["sname"],
-            s_alias=job["sname"],
+            s_alias=job["sname"], create_ts=job["start"],
             s_start=time.strftime("%y-%m-%d %H:%M:%S", time.localtime(job["start"])),
             s_start_ts=job["start"], rss=job["rss"], meta=self._job_meta(job),
         )
@@ -689,6 +692,7 @@ class DemoMonitor(Monitor):
                     pid=pane_pid, pname="zsh", user=self.focus_user, mem=0,
                     runtime="1h 02m", cmd="-zsh", runtime_sec=3720,
                     sid=pane_pid, sname=sname, s_alias=pane.alias,
+                    create_ts=time.time() - 3720,
                     s_start="-", s_start_ts=time.time() - 3720, rss=8 * 1024 ** 2,
                 )
                 pane.procs = [shell]

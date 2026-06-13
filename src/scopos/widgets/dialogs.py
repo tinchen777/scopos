@@ -122,18 +122,52 @@ def _clip(text: str, width: int) -> str:
     return text if len(text) <= width else text[: max(1, width - 1)] + "…"
 
 
-def terminate_procs(procs) -> Tuple[int, int]:
-    """Send SIGTERM to each process; return (killed, failed)."""
-    killed = failed = 0
-    for proc in sorted(procs, key=lambda p: p.pid, reverse=True):
+# Seconds a process gets to exit after SIGTERM before we escalate to SIGKILL.
+KILL_GRACE_SEC = 1.5
+
+
+def terminate_procs(procs) -> Tuple[int, int, int]:
+    """Actually terminate ``procs``; return ``(killed, survived, skipped)``.
+
+    Robust against the three ways the old version got this wrong:
+
+    * **PID reuse** — each ProcInfo carries ``create_ts``; before signalling we
+      re-open the PID and bail if its creation time no longer matches, so we
+      never hit a *different* process that recycled the PID.
+    * **already gone** — a PID that no longer exists is *skipped*, not counted
+      as a kill.
+    * **SIGTERM-ignorers** (interactive shells, etc.) — we send SIGTERM, wait
+      ``KILL_GRACE_SEC``, then SIGKILL whatever is still alive, and only report
+      ``killed`` for processes that are genuinely gone afterwards.
+    """
+    targets = []
+    skipped = 0
+    for proc in procs:
         try:
-            psutil.Process(proc.pid).terminate()
-            killed += 1
+            p = psutil.Process(proc.pid)
+            if proc.create_ts and abs(p.create_time() - proc.create_ts) > 1.0:
+                skipped += 1  # PID was reused by a different process — do NOT kill it
+                continue
+            targets.append(p)
         except psutil.NoSuchProcess:
-            killed += 1
+            skipped += 1  # already gone
         except Exception:
-            failed += 1
-    return killed, failed
+            skipped += 1  # unreadable
+
+    for p in targets:
+        try:
+            p.terminate()
+        except Exception:
+            pass
+    _gone, alive = psutil.wait_procs(targets, timeout=KILL_GRACE_SEC)
+    for p in alive:
+        try:
+            p.kill()
+        except Exception:
+            pass
+    _gone2, still_alive = psutil.wait_procs(alive, timeout=KILL_GRACE_SEC)
+    killed = len(targets) - len(still_alive)
+    return killed, len(still_alive), skipped
 
 
 def confirm_and_kill(app, procs, *, scope: str, detail: Optional[str] = None,
@@ -142,30 +176,42 @@ def confirm_and_kill(app, procs, *, scope: str, detail: Optional[str] = None,
 
     Shared by the table right-click menu and the footer Kill button so the kill
     flow lives in exactly one place. ``detail`` is the full per-field info shown
-    for a single process; multi-process kills always list every target.
+    for a single process; multi-process kills always list every target. The
+    termination itself runs in a thread worker (it waits for the grace period),
+    so the UI never blocks.
     """
     procs = list(procs)
     if not procs:
         app.notify("Nothing to kill", timeout=2)
         return
     if len(procs) == 1 and detail:
-        msg = "⚠ Kill this process?\nThis sends a terminate signal and cannot be undone.\n\n" + detail
+        msg = "⚠ Kill this process?\nSIGTERM, then SIGKILL after a grace period. Cannot be undone.\n\n" + detail
         label = "Kill"
     else:
         listing = "\n".join(f"  • {p.pid:>7}  {_clip(p.cmd or p.pname, 60)}" for p in procs)
         msg = (f"⚠ Multi-process kill — {scope} ({len(procs)} processes).\n"
-               "ALL of them will be sent a terminate signal (cannot be undone):\n\n" + listing)
+               "ALL of them will be terminated (SIGTERM, then SIGKILL). Cannot be undone:\n\n" + listing)
         label = f"Kill {len(procs)}"
 
-    def on_confirm(ok: bool, targets=procs):
-        if not ok:
-            return
-        killed, failed = terminate_procs(targets)
-        if failed:
-            app.notify(f"Killed {killed}, failed {failed} (permission?)", severity="error")
-        else:
-            app.notify(f"Sent terminate signal to {killed} process(es)")
+    def report(killed: int, survived: int, skipped: int, targets):
+        parts = []
+        if killed:
+            parts.append(f"killed {killed}")
+        if survived:
+            parts.append(f"{survived} survived (permission?)")
+        if skipped:
+            parts.append(f"{skipped} skipped (gone / PID reused)")
+        app.notify("; ".join(parts) or "nothing to kill",
+                   severity="error" if survived else "information")
         if after is not None:
             after(targets)
+
+    def run_kill(targets):
+        killed, survived, skipped = terminate_procs(targets)
+        app.call_from_thread(report, killed, survived, skipped, targets)
+
+    def on_confirm(ok: bool, targets=procs):
+        if ok:
+            app.run_worker(lambda: run_kill(targets), thread=True, group="kill", exclusive=False)
 
     app.push_screen(ConfirmScreen(msg, confirm_label=label), on_confirm)

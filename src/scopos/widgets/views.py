@@ -27,9 +27,13 @@ class TmuxView(Vertical):
     kill its whole pane or session (with a multi-process confirmation).
     """
 
+    # Unlike the tiled cards, the tmux page is a single table: let it fill the
+    # whole width and height (dropping ProcTable's default 20-row cap).
     DEFAULT_CSS = """
-    TmuxView { height: auto; }
+    TmuxView { height: 1fr; }
     TmuxView #hint { height: auto; color: $text-muted; padding: 0 2; }
+    TmuxView ProcTable { height: 1fr; }
+    TmuxView ProcTable DataTable { height: 1fr; max-height: 100%; width: 1fr; }
     """
 
     def __init__(self, monitor: Monitor, id: str, danger: bool = False):
