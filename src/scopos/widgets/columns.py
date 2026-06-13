@@ -193,7 +193,7 @@ def _tmux_session_cell(table: Any, proc: ProcInfo) -> Text:
         name, widx, pidx = proc.s_alias.rsplit(":", 2)
     except ValueError:
         return Text(proc.s_alias)
-    suffix = f":{widx}.{pidx}"
+    suffix = f":{widx}:{pidx}"
     room = (width or len(proc.s_alias)) - len(suffix)
     if room > 0 and len(name) > room:
         name = name[: max(1, room - 1)] + "…"
@@ -208,7 +208,8 @@ MODE_TUNING: Dict[str, Dict[str, Dict[str, Any]]] = {
     "zen": {},
     "cpu": {},
     "tmux": {
-        "SESSION": {"width": 14, "render": _tmux_session_cell},
+        "SESSION": {"width": 30, "render": _tmux_session_cell},
+        "COMMAND": {"width": 100},
     },
 }
 

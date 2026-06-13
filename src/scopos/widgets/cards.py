@@ -6,7 +6,7 @@ from rich.text import Text
 from textual.containers import Vertical
 from textual.widget import Widget
 from textual.widgets import Static
-from typing import (List, Optional, Tuple, Generator)
+from typing import (List, Optional, Tuple)
 
 from .. import config
 from ..monitor import (DeviceInfo, GPUInfo, Monitor, ProcInfo)

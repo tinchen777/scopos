@@ -76,7 +76,7 @@ TABLE_MAX_HEIGHT = 20
 COLUMN_WIDTHS: Dict[str, Optional[int]] = {
     "PID": 7,
     "USER": 12,
-    "NO.": 5,
+    "NO.": 2,
     "MEM/GB": 6,
     "RAM/GB": 6,
     "RUNTIME": 7,

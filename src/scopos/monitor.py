@@ -442,7 +442,7 @@ class Monitor:
                 pane_pid=pane_pid
             )
             pane.alias = f"{pane.sname}:{pane.window_idx}:{pane.pane_idx}"
-            pane_procs = self._bulid_pane_procs(pane, children)
+            pane_procs = self._build_pane_procs(pane, children)
             pane.procs = pane_procs
             # all procs
             all_procs.extend(pane_procs)
@@ -455,7 +455,7 @@ class Monitor:
 
         return named_sessions, all_procs
 
-    def _bulid_pane_procs(self, pane: TmuxPane, children: Dict[int, List[int]]) -> List[ProcInfo]:
+    def _build_pane_procs(self, pane: TmuxPane, children: Dict[int, List[int]]) -> List[ProcInfo]:
         """A pane's shell (``procs[0]``) plus its *direct* children (the running
         programs), using a prebuilt ``ppid -> [pid]`` map so there's no per-pane
         process scan. The session is already known, so no parent-chain walk.
